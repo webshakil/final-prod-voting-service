@@ -33,19 +33,7 @@ const PORT = process.env.PORT || 5003;
 
 // Security
 app.use(helmet());
-
-// CORS - ✅ FIXED: Added x-user-id to allowedHeaders
-// const corsOptions = {
-//   origin: [
-//     'http://localhost:3000',
-//     'https://prod-client-omega.vercel.app', 
-//   ],
-//   credentials: true,
-//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-//   allowedHeaders: ['Content-Type', 'Authorization', 'x-user-id'], // ✅ Added x-user-id
-// };
-
-// app.use(cors(corsOptions));
+// ✅ CORRECT - Uncomment this line!
 const corsOptions = {
   origin: [
     'http://localhost:3000',
@@ -56,6 +44,8 @@ const corsOptions = {
   allowedHeaders: '*', // ✅ Allow ALL headers
   exposedHeaders: ['*'], // ✅ Expose ALL headers
 };
+
+app.use(cors(corsOptions)); // ✅ MUST BE UNCOMMENTED!
 
 // Handle preflight requests explicitly
 app.options('*', cors(corsOptions));
