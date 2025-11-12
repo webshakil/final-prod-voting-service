@@ -35,10 +35,17 @@ const PORT = process.env.PORT || 5003;
 app.use(helmet());
 
 // CORS
-app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-  credentials: true
-}));
+const corsOptions = {
+  origin: [
+    'http://localhost:3000',
+    'https://prod-client-omega.vercel.app', 
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+app.use(cors(corsOptions));
 
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
