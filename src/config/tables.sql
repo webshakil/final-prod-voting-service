@@ -223,7 +223,65 @@ CREATE INDEX idx_voter_group_members_group ON votteryy_voter_group_members(group
 CREATE INDEX idx_voter_group_members_user ON votteryy_voter_group_members(user_id);
 CREATE INDEX idx_election_group_access_election ON votteryy_election_group_access(election_id);
 ```
+-- Prize distribution queue
+CREATE TABLE IF NOT EXISTS votteryy_prize_distribution_queue (
+  id SERIAL PRIMARY KEY,
+  user_id VARCHAR(255) NOT NULL,
+  election_id INTEGER REFERENCES votteryyy_elections(id),
+  winner_id INTEGER,
+  amount DECIMAL(10, 2) NOT NULL,
+  status VARCHAR(20) DEFAULT 'pending_review',
+  approved_by VARCHAR(255),
+  approved_at TIMESTAMP,
+  admin_notes TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 
+-- Sponsor funding
+CREATE TABLE IF NOT EXISTS votteryy_prize_pool_funding (
+  id SERIAL PRIMARY KEY,
+  sponsor_id VARCHAR(255) NOT NULL,
+  election_id INTEGER REFERENCES votteryyy_elections(id),
+  amount DECIMAL(10, 2) NOT NULL,
+  currency VARCHAR(3) DEFAULT 'USD',
+  payment_intent_id VARCHAR(255) UNIQUE,
+  status VARCHAR(20) DEFAULT 'pending',
+  confirmed_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Platform config
+CREATE TABLE IF NOT EXISTS votteryy_platform_config (
+  id SERIAL PRIMARY KEY,
+  auto_prize_distribution_threshold DECIMAL(10, 2) DEFAULT 5000.00,
+  auto_withdrawal_threshold DECIMAL(10, 2) DEFAULT 5000.00,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO votteryy_platform_config 
+(auto_prize_distribution_threshold, auto_withdrawal_threshold) 
+VALUES (5000.00, 5000.00)
+ON CONFLICT DO NOTHING;
+
+-- Add columns
+ALTER TABLE votteryy_wallet_transactions
+ADD COLUMN IF NOT EXISTS stripe_fee DECIMAL(10, 2) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS platform_fee DECIMAL(10, 2) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS net_amount DECIMAL(10, 2);
+
+ALTER TABLE votteryy_election_payments
+ADD COLUMN IF NOT EXISTS stripe_fee DECIMAL(10, 2) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS platform_fee DECIMAL(10, 2) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS net_amount DECIMAL(10, 2),
+ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+ALTER TABLE votteryy_blocked_accounts
+ADD COLUMN IF NOT EXISTS stripe_fee DECIMAL(10, 2) DEFAULT 0,
+ADD COLUMN IF NOT EXISTS platform_fee DECIMAL(10, 2) DEFAULT 0;
+
+ALTER TABLE votteryyy_elections
+ADD COLUMN IF NOT EXISTS prize_pool DECIMAL(12, 2) DEFAULT 0;
 ---
 
 ## 📁 FILES I NEED FROM YOU RIGHT NOW

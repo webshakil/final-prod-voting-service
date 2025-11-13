@@ -7,206 +7,212 @@ import { depositSchema, withdrawalSchema } from '../utils/validators.js';
 class WalletController {
 
   // Check if user can vote (hasn't voted yet)
-async canUserVote(req, res) {
-  try {
-    const userId = req.user.userId;
-    const { electionId } = req.params;
-
-    // Check if user already voted
-    const voteResult = await pool.query(
-      `SELECT voting_id FROM votteryy_votings
-       WHERE user_id = $1 AND election_id = $2
-       LIMIT 1`,
-      [userId, electionId]
-    );
-
-    const hasVoted = voteResult.rows.length > 0;
-
-    // Check if election exists and is active
-    const electionResult = await pool.query(
-      `SELECT id, status, start_date, end_date, end_time
-       FROM votteryyy_elections
-       WHERE id = $1`,
-      [electionId]
-    );
-
-    if (electionResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Election not found' });
-    }
-
-    const election = electionResult.rows[0];
-    const now = new Date();
-    const endDateTime = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
-
-    const canVote = !hasVoted && 
-                    election.status === 'published' && 
-                    now <= endDateTime;
-
-    res.json({
-      canVote,
-      hasVoted,
-      reason: hasVoted ? 'already_voted' : 
-              election.status !== 'published' ? 'election_not_active' :
-              now > endDateTime ? 'election_ended' : null
-    });
-
-  } catch (error) {
-    console.error('Check vote eligibility error:', error);
-    res.status(500).json({ error: 'Failed to check vote eligibility' });
-  }
-}
-
-  // Get user wallet
-  async getWallet(req, res) {
+  async canUserVote(req, res) {
     try {
       const userId = req.user.userId;
+      const { electionId } = req.params;
 
-      const result = await pool.query(
-        `SELECT * FROM votteryy_user_wallets WHERE user_id = $1`,
-        [userId]
+      // Check if user already voted
+      const voteResult = await pool.query(
+        `SELECT voting_id FROM votteryy_votings
+         WHERE user_id = $1 AND election_id = $2
+         LIMIT 1`,
+        [userId, electionId]
       );
 
-      if (result.rows.length === 0) {
-        // Create wallet if doesn't exist
-        const createResult = await pool.query(
-          `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
-           VALUES ($1, 0, 0, 'USD')
-           RETURNING *`,
-          [userId]
-        );
+      const hasVoted = voteResult.rows.length > 0;
 
-        return res.json(createResult.rows[0]);
+      // Check if election exists and is active
+      const electionResult = await pool.query(
+        `SELECT id, status, start_date, end_date, end_time
+         FROM votteryyy_elections
+         WHERE id = $1`,
+        [electionId]
+      );
+
+      if (electionResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Election not found' });
       }
 
-      res.json(result.rows[0]);
+      const election = electionResult.rows[0];
+      const now = new Date();
+      const endDateTime = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
 
-    } catch (error) {
-      console.error('Get wallet error:', error);
-      res.status(500).json({ error: 'Failed to retrieve wallet' });
-    }
-  }
-
-  // Get wallet transactions
-  async getTransactions(req, res) {
-    try {
-      const userId = req.user.userId;
-      const { 
-        page = 1, 
-        limit = 20, 
-        type, 
-        status, 
-        dateFrom, 
-        dateTo,
-        filterType // today, yesterday, last_week, last_30_days, custom
-      } = req.query;
-
-      const offset = (page - 1) * limit;
-
-      // Build query
-      let query = `SELECT * FROM votteryy_wallet_transactions WHERE user_id = $1`;
-      const params = [userId];
-      let paramIndex = 2;
-
-      // Type filter
-      if (type) {
-        query += ` AND transaction_type = $${paramIndex}`;
-        params.push(type);
-        paramIndex++;
-      }
-
-      // Status filter
-      if (status) {
-        query += ` AND status = $${paramIndex}`;
-        params.push(status);
-        paramIndex++;
-      }
-
-      // Date filters based on filterType
-      if (filterType) {
-        const now = new Date();
-        let startDate, endDate;
-
-        switch (filterType) {
-          case 'today':
-            startDate = new Date(now.setHours(0, 0, 0, 0));
-            endDate = new Date(now.setHours(23, 59, 59, 999));
-            break;
-          case 'yesterday':
-            const yesterday = new Date(now);
-            yesterday.setDate(yesterday.getDate() - 1);
-            startDate = new Date(yesterday.setHours(0, 0, 0, 0));
-            endDate = new Date(yesterday.setHours(23, 59, 59, 999));
-            break;
-          case 'last_week':
-            startDate = new Date(now);
-            startDate.setDate(startDate.getDate() - 7);
-            endDate = new Date();
-            break;
-          case 'last_30_days':
-            startDate = new Date(now);
-            startDate.setDate(startDate.getDate() - 30);
-            endDate = new Date();
-            break;
-          case 'custom':
-            if (dateFrom) startDate = new Date(dateFrom);
-            if (dateTo) endDate = new Date(dateTo);
-            break;
-        }
-
-        if (startDate) {
-          query += ` AND created_at >= $${paramIndex}`;
-          params.push(startDate);
-          paramIndex++;
-        }
-
-        if (endDate) {
-          query += ` AND created_at <= $${paramIndex}`;
-          params.push(endDate);
-          paramIndex++;
-        }
-      }
-
-      // Add ordering and pagination
-      query += ` ORDER BY created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
-      params.push(limit, offset);
-
-      const result = await pool.query(query, params);
-
-      // Get total count
-      let countQuery = `SELECT COUNT(*) FROM votteryy_wallet_transactions WHERE user_id = $1`;
-      const countParams = [userId];
-      let countParamIndex = 2;
-
-      if (type) {
-        countQuery += ` AND transaction_type = $${countParamIndex}`;
-        countParams.push(type);
-        countParamIndex++;
-      }
-
-      if (status) {
-        countQuery += ` AND status = $${countParamIndex}`;
-        countParams.push(status);
-        countParamIndex++;
-      }
-
-      const countResult = await pool.query(countQuery, countParams);
-      const totalCount = parseInt(countResult.rows[0].count);
+      const canVote = !hasVoted && 
+                      election.status === 'published' && 
+                      now <= endDateTime;
 
       res.json({
-        transactions: result.rows,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalCount,
-          totalPages: Math.ceil(totalCount / limit)
-        }
+        canVote,
+        hasVoted,
+        reason: hasVoted ? 'already_voted' : 
+                election.status !== 'published' ? 'election_not_active' :
+                now > endDateTime ? 'election_ended' : null
       });
 
     } catch (error) {
-      console.error('Get transactions error:', error);
-      res.status(500).json({ error: 'Failed to retrieve transactions' });
+      console.error('Check vote eligibility error:', error);
+      res.status(500).json({ error: 'Failed to check vote eligibility' });
     }
   }
+
+  // Get user wallet
+async getWallet(req, res) {
+  try {
+    const userId = req.user.userId;
+
+    console.log('💰 Getting wallet for userId:', userId);
+
+    const result = await pool.query(
+      `SELECT * FROM votteryy_wallets WHERE user_id = $1`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      console.log('⚠️ Wallet not found, creating new wallet');
+      
+      // Create wallet if doesn't exist
+      const createResult = await pool.query(
+        `INSERT INTO votteryy_wallets (user_id, balance, blocked_balance, currency)
+         VALUES ($1, 0, 0, 'USD')
+         RETURNING *`,
+        [userId]
+      );
+
+      console.log('✅ New wallet created:', createResult.rows[0]);
+      return res.json(createResult.rows[0]);
+    }
+
+    console.log('✅ Wallet found:', result.rows[0]);
+    res.json(result.rows[0]);
+
+  } catch (error) {
+    console.error('❌ Get wallet error:', error);
+    res.status(500).json({ error: 'Failed to retrieve wallet' });
+  }
+}
+
+async getTransactions(req, res) {
+  try {
+    const userId = req.user.userId;
+    const { 
+      page = 1, 
+      limit = 20, 
+      type, 
+      status, 
+      dateFrom, 
+      dateTo,
+      filterType
+    } = req.query;
+
+    console.log('📜 Getting transactions for userId:', userId, { page, limit, type, status, filterType });
+
+    const offset = (page - 1) * limit;
+
+    // Build query
+    let query = `SELECT * FROM votteryy_transactions WHERE user_id = $1`;
+    const params = [userId];
+    let paramIndex = 2;
+
+    if (type) {
+      query += ` AND transaction_type = $${paramIndex}`;
+      params.push(type);
+      paramIndex++;
+    }
+
+    if (status) {
+      query += ` AND status = $${paramIndex}`;
+      params.push(status);
+      paramIndex++;
+    }
+
+    // Date filters based on filterType
+    if (filterType) {
+      const now = new Date();
+      let startDate, endDate;
+
+      switch (filterType) {
+        case 'today':
+          startDate = new Date(now.setHours(0, 0, 0, 0));
+          endDate = new Date(now.setHours(23, 59, 59, 999));
+          break;
+        case 'yesterday':
+          const yesterday = new Date(now);
+          yesterday.setDate(yesterday.getDate() - 1);
+          startDate = new Date(yesterday.setHours(0, 0, 0, 0));
+          endDate = new Date(yesterday.setHours(23, 59, 59, 999));
+          break;
+        case 'last_week':
+          startDate = new Date(now);
+          startDate.setDate(startDate.getDate() - 7);
+          endDate = new Date();
+          break;
+        case 'last_30_days':
+          startDate = new Date(now);
+          startDate.setDate(startDate.getDate() - 30);
+          endDate = new Date();
+          break;
+        case 'custom':
+          if (dateFrom) startDate = new Date(dateFrom);
+          if (dateTo) endDate = new Date(dateTo);
+          break;
+      }
+
+      if (startDate) {
+        query += ` AND created_at >= $${paramIndex}`;
+        params.push(startDate);
+        paramIndex++;
+      }
+
+      if (endDate) {
+        query += ` AND created_at <= $${paramIndex}`;
+        params.push(endDate);
+        paramIndex++;
+      }
+    }
+
+    query += ` ORDER BY created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
+    params.push(limit, offset);
+
+    const result = await pool.query(query, params);
+
+    // Get total count
+    let countQuery = `SELECT COUNT(*) FROM votteryy_transactions WHERE user_id = $1`;
+    const countParams = [userId];
+    let countParamIndex = 2;
+
+    if (type) {
+      countQuery += ` AND transaction_type = $${countParamIndex}`;
+      countParams.push(type);
+      countParamIndex++;
+    }
+
+    if (status) {
+      countQuery += ` AND status = $${countParamIndex}`;
+      countParams.push(status);
+      countParamIndex++;
+    }
+
+    const countResult = await pool.query(countQuery, countParams);
+    const totalCount = parseInt(countResult.rows[0].count);
+
+    console.log('✅ Found transactions:', result.rows.length);
+
+    res.json({
+      transactions: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: totalCount,
+        totalPages: Math.ceil(totalCount / limit)
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Get transactions error:', error);
+    res.status(500).json({ error: 'Failed to retrieve transactions' });
+  }
+}
 
   // Deposit funds
   async deposit(req, res) {
@@ -214,29 +220,30 @@ async canUserVote(req, res) {
       const userId = req.user.userId;
       const { amount, paymentMethod, regionCode } = req.body;
 
-      // Validate
       const { error } = depositSchema.validate({ amount, paymentMethod });
       if (error) {
         return res.status(400).json({ error: error.details[0].message });
       }
 
-      // Create payment intent
+      // ✅ Get fee from subscription
+      const processingFeeConfig = await paymentService.getUserProcessingFee(userId);
+      
+      const stripeFee = (amount * 0.029) + 0.30;
+      const platformFee = paymentService.calculateProcessingFee(amount, processingFeeConfig);
+      const netAmount = amount - stripeFee - platformFee;
+
       const paymentResult = await paymentService.createStripePayment(
         amount,
         'USD',
         { userId, type: 'wallet_deposit' }
       );
 
-      // Record transaction
       await pool.query(
         `INSERT INTO votteryy_wallet_transactions
-         (user_id, transaction_type, amount, status, description, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+         (user_id, transaction_type, amount, stripe_fee, platform_fee, net_amount, status, description, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [
-          userId,
-          'deposit',
-          amount,
-          'pending',
+          userId, 'deposit', amount, stripeFee, platformFee, netAmount, 'pending',
           'Wallet deposit',
           JSON.stringify({ paymentIntentId: paymentResult.paymentIntentId })
         ]
@@ -245,9 +252,14 @@ async canUserVote(req, res) {
       res.json({
         success: true,
         clientSecret: paymentResult.clientSecret,
-        paymentIntentId: paymentResult.paymentIntentId
+        paymentIntentId: paymentResult.paymentIntentId,
+        breakdown: {
+          originalAmount: amount.toFixed(2),
+          stripeFee: stripeFee.toFixed(2),
+          platformFee: platformFee.toFixed(2),
+          netAmount: netAmount.toFixed(2)
+        }
       });
-
     } catch (error) {
       console.error('Deposit error:', error);
       res.status(500).json({ error: 'Failed to process deposit' });
@@ -567,68 +579,64 @@ async canUserVote(req, res) {
   }
 
   // Get wallet analytics
-  async getWalletAnalytics(req, res) {
-    try {
-      const userId = req.user.userId;
+async getWalletAnalytics(req, res) {
+  try {
+    const userId = req.user.userId;
 
-      // Total deposits
-      const depositsResult = await pool.query(
-        `SELECT COALESCE(SUM(amount), 0) as total_deposits, COUNT(*) as deposit_count
-         FROM votteryy_wallet_transactions
-         WHERE user_id = $1 AND transaction_type = 'deposit' AND status = 'success'`,
-        [userId]
-      );
+    console.log('📊 Getting wallet analytics for userId:', userId);
 
-      // Total withdrawals
-      const withdrawalsResult = await pool.query(
-        `SELECT COALESCE(SUM(amount), 0) as total_withdrawals, COUNT(*) as withdrawal_count
-         FROM votteryy_wallet_transactions
-         WHERE user_id = $1 AND transaction_type = 'withdraw' AND status = 'success'`,
-        [userId]
-      );
+    // Total deposits
+    const depositsResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total_deposits, COUNT(*) as deposit_count
+       FROM votteryy_transactions
+       WHERE user_id = $1 AND transaction_type = 'deposit' AND status = 'success'`,
+      [userId]
+    );
 
-      // Total prizes won
-      const prizesResult = await pool.query(
-        `SELECT COALESCE(SUM(amount), 0) as total_prizes, COUNT(*) as prize_count
-         FROM votteryy_wallet_transactions
-         WHERE user_id = $1 AND transaction_type = 'prize_won' AND status = 'success'`,
-        [userId]
-      );
+    // Total withdrawals
+    const withdrawalsResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total_withdrawals, COUNT(*) as withdrawal_count
+       FROM votteryy_transactions
+       WHERE user_id = $1 AND transaction_type = 'withdraw' AND status = 'success'`,
+      [userId]
+    );
 
-      // Total election fees paid
-      const feesResult = await pool.query(
-        `SELECT COALESCE(SUM(amount), 0) as total_fees, COUNT(*) as election_count
-         FROM votteryy_wallet_transactions
-         WHERE user_id = $1 AND transaction_type = 'election_payment' AND status = 'success'`,
-        [userId]
-      );
+    // Total prizes won
+    const prizesResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total_prizes, COUNT(*) as prize_count
+       FROM votteryy_transactions
+       WHERE user_id = $1 AND transaction_type = 'prize_won' AND status = 'success'`,
+      [userId]
+    );
 
-      // Current wallet balance
-      const walletResult = await pool.query(
-        `SELECT balance, blocked_balance FROM votteryy_user_wallets WHERE user_id = $1`,
-        [userId]
-      );
+    // Total election fees paid
+    const feesResult = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total_fees, COUNT(*) as election_count
+       FROM votteryy_transactions
+       WHERE user_id = $1 AND transaction_type = 'election_payment' AND status = 'success'`,
+      [userId]
+    );
 
-      const wallet = walletResult.rows[0] || { balance: 0, blocked_balance: 0 };
+    const analytics = {
+      totalDeposits: parseFloat(depositsResult.rows[0].total_deposits),
+      depositCount: parseInt(depositsResult.rows[0].deposit_count),
+      totalWithdrawals: parseFloat(withdrawalsResult.rows[0].total_withdrawals),
+      withdrawalCount: parseInt(withdrawalsResult.rows[0].withdrawal_count),
+      totalPrizesWon: parseFloat(prizesResult.rows[0].total_prizes),
+      prizeCount: parseInt(prizesResult.rows[0].prize_count),
+      totalElectionFees: parseFloat(feesResult.rows[0].total_fees),
+      electionCount: parseInt(feesResult.rows[0].election_count)
+    };
 
-      res.json({
-        currentBalance: parseFloat(wallet.balance),
-        blockedBalance: parseFloat(wallet.blocked_balance),
-        totalDeposits: parseFloat(depositsResult.rows[0].total_deposits),
-        depositCount: parseInt(depositsResult.rows[0].deposit_count),
-        totalWithdrawals: parseFloat(withdrawalsResult.rows[0].total_withdrawals),
-        withdrawalCount: parseInt(withdrawalsResult.rows[0].withdrawal_count),
-        totalPrizesWon: parseFloat(prizesResult.rows[0].total_prizes),
-        prizeCount: parseInt(prizesResult.rows[0].prize_count),
-        totalElectionFees: parseFloat(feesResult.rows[0].total_fees),
-        electionCount: parseInt(feesResult.rows[0].election_count)
-      });
+    console.log('✅ Analytics calculated:', analytics);
 
-    } catch (error) {
-      console.error('Get wallet analytics error:', error);
-      res.status(500).json({ error: 'Failed to retrieve wallet analytics' });
-    }
+    res.json(analytics);
+
+  } catch (error) {
+    console.error('❌ Get wallet analytics error:', error);
+    res.status(500).json({ error: 'Failed to retrieve wallet analytics' });
   }
+}
 
   // Process election participation payment
   async payForElection(req, res) {
@@ -696,70 +704,242 @@ async canUserVote(req, res) {
     }
   }
 
-  // Confirm election payment (webhook)
-// Confirm election payment (webhook from Stripe)
-async confirmElectionPayment(req, res) {
-  try {
-    const { paymentIntentId, electionId } = req.body;
+  // Confirm election payment (webhook from Stripe)
+  async confirmElectionPayment(req, res) {
+    try {
+      const { paymentIntentId, electionId } = req.body;
 
-    console.log('🔔 Webhook received:', { paymentIntentId, electionId });
+      console.log('🔔 Webhook received:', { paymentIntentId, electionId });
 
-    // ✅ Verify this is from Stripe (optional but recommended)
-    const sig = req.headers['stripe-signature'];
-    if (sig && process.env.STRIPE_WEBHOOK_SECRET) {
-      try {
-        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-        const event = stripe.webhooks.constructEvent(
-          req.body, 
-          sig, 
-          process.env.STRIPE_WEBHOOK_SECRET
-        );
-        console.log('✅ Webhook signature verified:', event.type);
-      } catch (err) {
-        console.error('⚠️ Webhook signature verification failed:', err.message);
-        return res.status(400).json({ error: 'Invalid signature' });
+      // ✅ Verify this is from Stripe (optional but recommended)
+      const sig = req.headers['stripe-signature'];
+      if (sig && process.env.STRIPE_WEBHOOK_SECRET) {
+        try {
+          const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+          const event = stripe.webhooks.constructEvent(
+            req.body, 
+            sig, 
+            process.env.STRIPE_WEBHOOK_SECRET
+          );
+          console.log('✅ Webhook signature verified:', event.type);
+        } catch (err) {
+          console.error('⚠️ Webhook signature verification failed:', err.message);
+          return res.status(400).json({ error: 'Invalid signature' });
+        }
       }
+
+      await paymentService.confirmPaymentAndBlock(paymentIntentId, electionId);
+
+      res.json({ 
+        success: true, 
+        message: 'Payment confirmed and funds blocked until election ends' 
+      });
+
+    } catch (error) {
+      console.error('Confirm election payment error:', error);
+      res.status(500).json({ error: 'Failed to confirm payment' });
     }
-
-    await paymentService.confirmPaymentAndBlock(paymentIntentId, electionId);
-
-    res.json({ 
-      success: true, 
-      message: 'Payment confirmed and funds blocked until election ends' 
-    });
-
-  } catch (error) {
-    console.error('Confirm election payment error:', error);
-    res.status(500).json({ error: 'Failed to confirm payment' });
   }
-}
 
   // Check election payment status
-async checkElectionPaymentStatus(req, res) {
-  try {
-    const userId = req.user.userId;
-    const { electionId } = req.params;
+  async checkElectionPaymentStatus(req, res) {
+    try {
+      const userId = req.user.userId;
+      const { electionId } = req.params;
 
-    // Check if user has paid PARTICIPATION FEE for this election
-    const paymentResult = await pool.query(
-      `SELECT * FROM votteryy_election_payments
-       WHERE user_id = $1 AND election_id = $2 AND status = 'succeeded'
-       LIMIT 1`,
-      [userId, electionId]
-    );
+      // Check if user has paid PARTICIPATION FEE for this election
+      const paymentResult = await pool.query(
+        `SELECT * FROM votteryy_election_payments
+         WHERE user_id = $1 AND election_id = $2 AND status = 'succeeded'
+         LIMIT 1`,
+        [userId, electionId]
+      );
 
-    const paid = paymentResult.rows.length > 0;
+      const paid = paymentResult.rows.length > 0;
 
-    res.json({
-      paid,
-      payment: paid ? paymentResult.rows[0] : null
-    });
+      res.json({
+        paid,
+        payment: paid ? paymentResult.rows[0] : null
+      });
 
-  } catch (error) {
-    console.error('Check participation fee status error:', error);
-    res.status(500).json({ error: 'Failed to check payment status' });
+    } catch (error) {
+      console.error('Check participation fee status error:', error);
+      res.status(500).json({ error: 'Failed to check payment status' });
+    }
   }
-}
+
+  // ===== PRIZE DISTRIBUTION =====
+
+  // Distribute lottery prizes to winners
+  async distributeLotteryPrizes(req, res) {
+    try {
+      const { electionId } = req.params;
+      
+      // Get lottery winners
+      const winnersResult = await pool.query(
+        `SELECT lw.*, v.user_id, ud.email 
+         FROM votteryy_lottery_winners lw
+         JOIN votteryy_votings v ON lw.voting_id = v.voting_id
+         JOIN votteryy_user_details ud ON v.user_id = ud.user_id
+         WHERE lw.election_id = $1 AND lw.prize_claimed = false`,
+        [electionId]
+      );
+
+      // Get election prize config
+      const electionResult = await pool.query(
+        `SELECT prize_amount, auto_distribute_threshold FROM votteryyy_elections WHERE id = $1`,
+        [electionId]
+      );
+
+      const election = electionResult.rows[0];
+      const autoDistribute = election.prize_amount < election.auto_distribute_threshold;
+
+      for (const winner of winnersResult.rows) {
+        if (autoDistribute) {
+          // Auto distribute
+          await this.creditPrizeToWallet(winner.user_id, winner.prize_amount, electionId);
+        } else {
+          // Queue for admin review
+          await pool.query(
+            `INSERT INTO votteryy_prize_distribution_queue 
+             (user_id, election_id, amount, status)
+             VALUES ($1, $2, $3, 'pending_review')`,
+            [winner.user_id, electionId, winner.prize_amount]
+          );
+        }
+      }
+
+      res.json({ success: true, distributedCount: winnersResult.rows.length });
+    } catch (error) {
+      console.error('Distribute prizes error:', error);
+      res.status(500).json({ error: 'Failed to distribute prizes' });
+    }
+  }
+
+  // Credit prize to winner's wallet
+  async creditPrizeToWallet(userId, amount, electionId) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Add to wallet
+      await client.query(
+        `UPDATE votteryy_user_wallets
+         SET balance = balance + $1
+         WHERE user_id = $2`,
+        [amount, userId]
+      );
+
+      // Record transaction
+      await client.query(
+        `INSERT INTO votteryy_wallet_transactions
+         (user_id, transaction_type, amount, election_id, status, description)
+         VALUES ($1, 'prize_won', $2, $3, 'success', 'Lottery prize winnings')`,
+        [userId, amount, electionId]
+      );
+
+      // Mark prize as claimed
+      await client.query(
+        `UPDATE votteryy_lottery_winners
+         SET prize_claimed = true, claimed_at = CURRENT_TIMESTAMP
+         WHERE user_id = $1 AND election_id = $2`,
+        [userId, electionId]
+      );
+
+      await client.query('COMMIT');
+      return { success: true };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  // Get user's prizes
+  async getMyPrizes(req, res) {
+    try {
+      const userId = req.user.userId;
+      
+      const result = await pool.query(
+        `SELECT lw.*, e.title as election_title
+         FROM votteryy_lottery_winners lw
+         JOIN votteryyy_elections e ON lw.election_id = e.id
+         WHERE lw.user_id = $1
+         ORDER BY lw.created_at DESC`,
+        [userId]
+      );
+
+      res.json({ prizes: result.rows });
+    } catch (error) {
+      console.error('Get my prizes error:', error);
+      res.status(500).json({ error: 'Failed to retrieve prizes' });
+    }
+  }
+
+  // Get pending prize distributions (admin)
+  async getPendingPrizeDistributions(req, res) {
+    try {
+      res.status(501).json({ error: 'Feature not implemented yet' });
+    } catch (error) {
+      console.error('Get pending prize distributions error:', error);
+      res.status(500).json({ error: 'Failed to retrieve pending prize distributions' });
+    }
+  }
+
+  // Review prize distribution (admin)
+  async reviewPrizeDistribution(req, res) {
+    try {
+      res.status(501).json({ error: 'Feature not implemented yet' });
+    } catch (error) {
+      console.error('Review prize distribution error:', error);
+      res.status(500).json({ error: 'Failed to review prize distribution' });
+    }
+  }
+
+  // ===== SPONSOR OPERATIONS =====
+
+  // Fund prize pool
+  async fundPrizePool(req, res) {
+    try {
+      res.status(501).json({ error: 'Feature not implemented yet' });
+    } catch (error) {
+      console.error('Fund prize pool error:', error);
+      res.status(500).json({ error: 'Failed to fund prize pool' });
+    }
+  }
+
+  // Confirm prize funding
+  async confirmPrizeFunding(req, res) {
+    try {
+      res.status(501).json({ error: 'Feature not implemented yet' });
+    } catch (error) {
+      console.error('Confirm prize funding error:', error);
+      res.status(500).json({ error: 'Failed to confirm prize funding' });
+    }
+  }
+
+  // Get sponsored elections
+  async getSponsoredElections(req, res) {
+    try {
+      res.status(501).json({ error: 'Feature not implemented yet' });
+    } catch (error) {
+      console.error('Get sponsored elections error:', error);
+      res.status(500).json({ error: 'Failed to retrieve sponsored elections' });
+    }
+  }
+
+  // ===== REFUNDS =====
+
+  // Refund failed election
+  async refundFailedElection(req, res) {
+    try {
+      res.status(501).json({ error: 'Feature not implemented yet' });
+    } catch (error) {
+      console.error('Refund failed election error:', error);
+      res.status(500).json({ error: 'Failed to refund election' });
+    }
+  }
 }
 
 export default new WalletController();

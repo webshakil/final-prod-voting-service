@@ -102,6 +102,56 @@ router.get(
   walletController.canUserVote
 );
 
+// Prize distribution
+router.post(
+  '/prizes/distribute/:electionId',
+  roleCheck(['admin', 'manager']),
+  walletController.distributeLotteryPrizes
+);
+
+router.get(
+  '/prizes/my-prizes',
+  roleCheck(['voter']),
+  walletController.getMyPrizes
+);
+
+router.get(
+  '/admin/prizes/pending',
+  roleCheck(['admin', 'manager']),
+  walletController.getPendingPrizeDistributions
+);
+
+router.put(
+  '/admin/prizes/:queueId/review',
+  roleCheck(['admin', 'manager']),
+  walletController.reviewPrizeDistribution
+);
+
+// Sponsor operations
+router.post(
+  '/sponsor/fund-prize-pool',
+  roleCheck(['sponsor']),
+  walletController.fundPrizePool
+);
+
+router.post(
+  '/sponsor/fund-prize-pool/confirm',
+  walletController.confirmPrizeFunding
+);
+
+router.get(
+  '/sponsor/my-elections',
+  roleCheck(['sponsor']),
+  walletController.getSponsoredElections
+);
+
+// Refunds
+router.post(
+  '/admin/refund-election/:electionId',
+  roleCheck(['admin', 'manager']),
+  walletController.refundFailedElection
+);
+
 export default router;
 // import express from 'express';
 // import walletController from '../controllers/wallet.controller.js';

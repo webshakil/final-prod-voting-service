@@ -96,150 +96,120 @@ class PaymentService {
   }
 
   // Process election participation payment
-async processElectionPayment(userId, electionId, amount, regionCode, currency = 'USD') {
+// payment.service.js - processElectionPayment function
+
+async processElectionPayment(userId, electionId, amount, regionCode) {
   const client = await pool.connect();
+  
   try {
     await client.query('BEGIN');
 
-    const existingPayment = await client.query(
-      `SELECT * FROM votteryy_election_payments
-       WHERE user_id = $1 AND election_id = $2 AND status IN ('succeeded', 'pending')
-       ORDER BY created_at DESC
+    // ✅ STEP 1: Check if payment already exists
+    const existingPaymentResult = await client.query(
+      `SELECT * FROM votteryy_election_payments 
+       WHERE user_id = $1 AND election_id = $2 
+       ORDER BY created_at DESC 
        LIMIT 1`,
       [userId, electionId]
     );
 
-    if (existingPayment.rows.length > 0) {
-      const payment = existingPayment.rows[0];
+    // ✅ If payment exists and is succeeded, return early
+    if (existingPaymentResult.rows.length > 0) {
+      const existingPayment = existingPaymentResult.rows[0];
       
-      if (payment.status === 'succeeded') {
-        await client.query('ROLLBACK');
-        console.log('✅ Payment already succeeded for this election');
-        
+      console.log('📋 Existing payment found:', existingPayment);
+
+      if (existingPayment.status === 'succeeded') {
+        console.log('✅ Payment already completed');
+        await client.query('COMMIT');
         return {
-          success: true,
-          clientSecret: payment.client_secret,
-          paymentIntentId: payment.payment_intent_id,
-          gateway: payment.gateway_used,
-          payment: payment,
-          alreadyPaid: true
+          alreadyPaid: true,
+          payment: existingPayment,
+          message: 'You have already paid for this election'
         };
       }
-      
-      // ✅ If pending, verify with Stripe first
-      if (payment.status === 'pending' && payment.payment_intent_id) {
-        console.log('⚠️ Found pending payment, verifying with Stripe:', payment.payment_intent_id);
+
+      // ✅ If payment is pending or failed, reuse it
+      if (existingPayment.status === 'pending' || existingPayment.status === 'failed') {
+        console.log('♻️ Reusing existing payment record');
         
-        try {
-          const paymentIntent = await stripe.paymentIntents.retrieve(payment.payment_intent_id);
-          
-          if (paymentIntent.status === 'succeeded') {
-            console.log('✅ Stripe confirmed payment succeeded, updating database');
-            
-            await client.query(
-              `UPDATE votteryy_election_payments 
-               SET status = 'succeeded', updated_at = CURRENT_TIMESTAMP 
-               WHERE payment_intent_id = $1`,
-              [payment.payment_intent_id]
-            );
-            
-            await client.query('COMMIT');
-            
-            return {
-              success: true,
-              clientSecret: payment.client_secret,
-              paymentIntentId: payment.payment_intent_id,
-              gateway: payment.gateway_used,
-              payment: { ...payment, status: 'succeeded' },
-              alreadyPaid: true
-            };
-          } else if (paymentIntent.status === 'requires_payment_method' || paymentIntent.status === 'requires_confirmation') {
-            console.log('⚠️ Payment still pending, returning existing');
-            await client.query('ROLLBACK');
-            
-            return {
-              success: true,
-              clientSecret: payment.client_secret,
-              paymentIntentId: payment.payment_intent_id,
-              gateway: payment.gateway_used,
-              payment: payment
-            };
-          }
-        } catch (stripeError) {
-          console.error('❌ Error checking Stripe:', stripeError.message);
-        }
-      }
-      
-      // If pending but no valid state, delete and create new
-      if (payment.status === 'pending') {
-        console.log('⚠️ Deleting invalid pending payment');
+        // Update the payment record
         await client.query(
-          `DELETE FROM votteryy_election_payments WHERE id = $1`,
-          [payment.id]
+          `UPDATE votteryy_election_payments 
+           SET status = 'pending', 
+               updated_at = CURRENT_TIMESTAMP 
+           WHERE id = $1`,
+          [existingPayment.id]
         );
+
+        // Create new Stripe payment intent
+        const paymentIntent = await this.createStripePayment(amount, 'USD', {
+          userId,
+          electionId,
+          type: 'election_payment'
+        });
+
+        console.log('💳 New PaymentIntent created:', {
+          id: paymentIntent.paymentIntentId,
+          client_secret: 'exists',
+          status: paymentIntent.status
+        });
+
+        // Update with new payment intent ID
+        await client.query(
+          `UPDATE votteryy_election_payments 
+           SET payment_intent_id = $1 
+           WHERE id = $2`,
+          [paymentIntent.paymentIntentId, existingPayment.id]
+        );
+
+        await client.query('COMMIT');
+
+        return {
+          payment: existingPayment,
+          clientSecret: paymentIntent.clientSecret,
+          paymentIntentId: paymentIntent.paymentIntentId,
+          gateway: 'stripe'
+        };
       }
     }
 
-    // Create new payment (rest of your existing code)
-    const { gateway } = await this.getGatewayForRegion(regionCode);
+    // ✅ STEP 2: No existing payment found, create new one
+    console.log('🆕 Creating new payment record');
 
-    const electionResult = await client.query(
-      `SELECT processing_fee_percentage FROM votteryyy_elections WHERE id = $1`,
-      [electionId]
-    );
-
-    const processingFeePercentage = electionResult.rows[0]?.processing_fee_percentage || 0;
-    const platformFee = (amount * processingFeePercentage) / 100;
-
-    let paymentResult;
-    const metadata = { userId, electionId, type: 'election_participation' };
-
-    console.log('🔵 Creating new payment with gateway:', gateway);
-
-    if (gateway === 'stripe') {
-      paymentResult = await this.createStripePayment(amount, currency, metadata);
-    } else {
-      paymentResult = await this.createPaddlePayment(amount, currency, metadata);
-    }
-
-    console.log('✅ Payment result:', {
-      paymentIntentId: paymentResult.paymentIntentId,
-      clientSecret: paymentResult.clientSecret ? 'exists' : 'NULL',
-      gateway: paymentResult.gateway
+    const paymentIntent = await this.createStripePayment(amount, 'USD', {
+      userId,
+      electionId,
+      type: 'election_payment'
     });
 
-    const paymentRecord = await client.query(
-      `INSERT INTO votteryy_election_payments 
-       (user_id, election_id, payment_intent_id, gateway_used, amount, platform_fee, currency, status, client_secret)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING *`,
-      [
-        userId, 
-        electionId, 
-        paymentResult.paymentIntentId, 
-        gateway, 
-        amount, 
-        platformFee, 
-        currency, 
-        'pending',
-        paymentResult.clientSecret
-      ]
-    );
+    console.log('💳 PaymentIntent created:', {
+      id: paymentIntent.paymentIntentId,
+      client_secret: 'exists',
+      status: paymentIntent.status
+    });
 
-    console.log('✅ Payment record saved');
+    // Insert new payment record
+    const paymentResult = await client.query(
+      `INSERT INTO votteryy_election_payments 
+       (user_id, election_id, amount, currency, status, payment_intent_id, gateway_used, region_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [userId, electionId, amount, 'USD', 'pending', paymentIntent.paymentIntentId, 'stripe', regionCode]
+    );
 
     await client.query('COMMIT');
 
     return {
-      success: true,
-      clientSecret: paymentResult.clientSecret,
-      paymentIntentId: paymentResult.paymentIntentId,
-      gateway: gateway,
-      payment: paymentRecord.rows[0]
+      payment: paymentResult.rows[0],
+      clientSecret: paymentIntent.clientSecret,
+      paymentIntentId: paymentIntent.paymentIntentId,
+      gateway: 'stripe'
     };
+
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('💥 Payment service error:', error);
+    console.error('❌ Process election payment error:', error);
     throw error;
   } finally {
     client.release();
@@ -375,6 +345,65 @@ async processElectionPayment(userId, electionId, amount, regionCode, currency = 
       client.release();
     }
   }
+
+
+  // payment.service.js - ADD THESE METHODS
+
+// ✅ Get processing fee from user's active subscription
+async getUserProcessingFee(userId) {
+  try {
+    const result = await pool.query(
+      `SELECT 
+         sp.processing_fee_enabled,
+         sp.processing_fee_mandatory,
+         sp.processing_fee_type,
+         sp.processing_fee_fixed_amount,
+         sp.processing_fee_percentage
+       FROM votteryy_user_subscriptions us
+       JOIN votteryy_subscription_plans sp ON us.plan_id = sp.id
+       WHERE us.user_id = $1 
+         AND us.status = 'active'
+         AND us.end_date > NOW()
+       ORDER BY us.created_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      // No subscription - FREE user defaults
+      return {
+        enabled: true,
+        mandatory: true,
+        type: 'percentage',
+        fixedAmount: 0,
+        percentage: 5.0 // Free users pay 5%
+      };
+    }
+
+    const plan = result.rows[0];
+    return {
+      enabled: plan.processing_fee_enabled,
+      mandatory: plan.processing_fee_mandatory,
+      type: plan.processing_fee_type,
+      fixedAmount: parseFloat(plan.processing_fee_fixed_amount || 0),
+      percentage: parseFloat(plan.processing_fee_percentage || 0)
+    };
+  } catch (error) {
+    console.error('Get user processing fee error:', error);
+    throw error;
+  }
+}
+
+// ✅ Calculate processing fee
+calculateProcessingFee(amount, feeConfig) {
+  if (!feeConfig.enabled) return 0;
+  
+  if (feeConfig.type === 'fixed') {
+    return feeConfig.fixedAmount;
+  } else {
+    return (amount * feeConfig.percentage) / 100;
+  }
+}
 
   // Execute withdrawal (called by admin or automatically)
   async executeWithdrawal(requestId, adminId = null) {
