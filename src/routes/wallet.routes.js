@@ -42,6 +42,7 @@ router.post(
 );
 
 // Confirm deposit (webhook)
+router.post('/paddle/webhook', walletController.handlePaddleWebhook);
 router.post(
   '/deposit/confirm',
   walletController.confirmDeposit
