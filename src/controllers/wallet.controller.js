@@ -600,78 +600,162 @@ class WalletController {
   }
 
   // ✅ UPDATED: Process election participation payment (now supports Paddle)
-  async payForElection(req, res) {
-    try {
-      const userId = req.user.userId;
-      const { electionId, regionCode, paymentGateway = 'stripe' } = req.body; // ← Added paymentGateway
+  // Replace the payForElection function in wallet.controller.js with this:
 
-      // Get user email for Paddle
+async payForElection(req, res) {
+  try {
+    const userId = req.user.userId;
+    const { electionId, regionCode, paymentGateway = 'stripe' } = req.body;
+
+    // ✅ FIXED: Get user email from correct table
+    let userEmail = `voter${userId}@vottery.com`; // Default fallback
+    
+    try {
+      // Try to get email from users table
       const userResult = await pool.query(
-        `SELECT email FROM votteryy_user_details WHERE user_id = $1`,
+        `SELECT email FROM users WHERE user_id = $1`,
         [userId]
       );
-      const userEmail = userResult.rows[0]?.email;
-
-      const electionResult = await pool.query(
-        `SELECT * FROM votteryyy_elections WHERE id = $1`,
-        [electionId]
-      );
-
-      if (electionResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Election not found' });
+      
+      if (userResult.rows.length > 0 && userResult.rows[0].email) {
+        userEmail = userResult.rows[0].email;
       }
-
-      const election = electionResult.rows[0];
-
-      if (election.is_free) {
-        return res.status(400).json({ error: 'This election is free' });
-      }
-
-      let amount = 0;
-
-      if (election.pricing_type === 'general_fee') {
-        amount = parseFloat(election.general_participation_fee);
-      } else if (election.pricing_type === 'regional_fee') {
-        const regionalResult = await pool.query(
-          `SELECT participation_fee FROM votteryy_election_regional_pricing
-           WHERE election_id = $1 AND region_code = $2`,
-          [electionId, regionCode]
-        );
-
-        if (regionalResult.rows.length === 0) {
-          return res.status(400).json({ error: 'Regional pricing not configured for your region' });
-        }
-
-        amount = parseFloat(regionalResult.rows[0].participation_fee);
-      }
-
-      if (amount <= 0) {
-        return res.status(400).json({ error: 'Invalid participation fee' });
-      }
-
-      // ✅ Process payment with gateway parameter
-      const paymentResult = await paymentService.processElectionPayment(
-        userId,
-        electionId,
-        amount,
-        regionCode,
-        paymentGateway, // ← Pass gateway
-        userEmail       // ← Pass email for Paddle
-      );
-
-      res.json({
-        success: true,
-        payment: paymentResult.payment,
-        clientSecret: paymentResult.clientSecret,
-        checkoutUrl: paymentResult.checkoutUrl, // ← For Paddle
-        gateway: paymentResult.gateway
-      });
-
-    } catch (error) {
-      console.error('Pay for election error:', error);
-      res.status(500).json({ error: error.message || 'Failed to process election payment' });
+    } catch (emailError) {
+      console.log('⚠️ Could not fetch user email, using fallback:', userEmail);
     }
+
+    const electionResult = await pool.query(
+      `SELECT * FROM votteryyy_elections WHERE id = $1`,
+      [electionId]
+    );
+
+    if (electionResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Election not found' });
+    }
+
+    const election = electionResult.rows[0];
+
+    if (election.is_free) {
+      return res.status(400).json({ error: 'This election is free' });
+    }
+
+    let amount = 0;
+
+    if (election.pricing_type === 'general_fee') {
+      amount = parseFloat(election.general_participation_fee);
+    } else if (election.pricing_type === 'regional_fee') {
+      const regionalResult = await pool.query(
+        `SELECT participation_fee FROM votteryy_election_regional_pricing
+         WHERE election_id = $1 AND region_code = $2`,
+        [electionId, regionCode]
+      );
+
+      if (regionalResult.rows.length === 0) {
+        return res.status(400).json({ error: 'Regional pricing not configured for your region' });
+      }
+
+      amount = parseFloat(regionalResult.rows[0].participation_fee);
+    }
+
+    if (amount <= 0) {
+      return res.status(400).json({ error: 'Invalid participation fee' });
+    }
+
+    // ✅ Process payment with gateway parameter
+    const paymentResult = await paymentService.processElectionPayment(
+      userId,
+      electionId,
+      amount,
+      regionCode,
+      paymentGateway,
+      userEmail
+    );
+
+    res.json({
+      success: true,
+      payment: paymentResult.payment,
+      clientSecret: paymentResult.clientSecret,
+      checkoutUrl: paymentResult.checkoutUrl,
+      gateway: paymentResult.gateway
+    });
+
+  } catch (error) {
+    console.error('Pay for election error:', error);
+    res.status(500).json({ error: error.message || 'Failed to process election payment' });
   }
+}
+  // async payForElection(req, res) {
+  //   try {
+  //     const userId = req.user.userId;
+  //     const { electionId, regionCode, paymentGateway = 'stripe' } = req.body; // ← Added paymentGateway
+
+  //     // Get user email for Paddle
+  //     const userResult = await pool.query(
+  //       `SELECT email FROM votteryy_user_details WHERE user_id = $1`,
+  //       [userId]
+  //     );
+  //     const userEmail = userResult.rows[0]?.email;
+
+  //     const electionResult = await pool.query(
+  //       `SELECT * FROM votteryyy_elections WHERE id = $1`,
+  //       [electionId]
+  //     );
+
+  //     if (electionResult.rows.length === 0) {
+  //       return res.status(404).json({ error: 'Election not found' });
+  //     }
+
+  //     const election = electionResult.rows[0];
+
+  //     if (election.is_free) {
+  //       return res.status(400).json({ error: 'This election is free' });
+  //     }
+
+  //     let amount = 0;
+
+  //     if (election.pricing_type === 'general_fee') {
+  //       amount = parseFloat(election.general_participation_fee);
+  //     } else if (election.pricing_type === 'regional_fee') {
+  //       const regionalResult = await pool.query(
+  //         `SELECT participation_fee FROM votteryy_election_regional_pricing
+  //          WHERE election_id = $1 AND region_code = $2`,
+  //         [electionId, regionCode]
+  //       );
+
+  //       if (regionalResult.rows.length === 0) {
+  //         return res.status(400).json({ error: 'Regional pricing not configured for your region' });
+  //       }
+
+  //       amount = parseFloat(regionalResult.rows[0].participation_fee);
+  //     }
+
+  //     if (amount <= 0) {
+  //       return res.status(400).json({ error: 'Invalid participation fee' });
+  //     }
+
+  //     // ✅ Process payment with gateway parameter
+  //     const paymentResult = await paymentService.processElectionPayment(
+  //       userId,
+  //       electionId,
+  //       amount,
+  //       regionCode,
+  //       paymentGateway, // ← Pass gateway
+  //       userEmail       // ← Pass email for Paddle
+  //     );
+
+  //     res.json({
+  //       success: true,
+  //       payment: paymentResult.payment,
+  //       clientSecret: paymentResult.clientSecret,
+  //       checkoutUrl: paymentResult.checkoutUrl, // ← For Paddle
+  //       gateway: paymentResult.gateway
+  //     });
+
+  //   } catch (error) {
+  //     console.error('Pay for election error:', error);
+  //     res.status(500).json({ error: error.message || 'Failed to process election payment' });
+  //   }
+  // }
 
   async confirmElectionPayment(req, res) {
     try {
