@@ -389,3 +389,15 @@ You need:
 votteryy_results_visibility - Track visibility status + change history
 
 Why: You need to track when creator changes visibility from hidden → visible (and prevent reverse)
+
+
+CREATE TABLE IF NOT EXISTS votteryy_wallets (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL UNIQUE,
+    balance DECIMAL(10,2) DEFAULT 0.00,
+    blocked_balance DECIMAL(10,2) DEFAULT 0.00,
+    currency VARCHAR(3) DEFAULT 'USD',
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE
+);
