@@ -73,12 +73,12 @@ class PaymentService {
 
   // ✅ UPDATED: Create Paddle payment
   // ✅ CORRECTED: Create Paddle payment
-  async createPaddlePayment(amount, currency, metadata) {
+async createPaddlePayment(amount, currency, metadata) {
   try {
-    console.log('🟣 Creating Paddle payment (NEW API):', { amount, currency, metadata });
+    console.log('🟣 Creating Paddle payment:', { amount, currency, metadata });
 
     if (!paddleConfig.apiKey) {
-      throw new Error('PADDLE_API_KEY not configured in .env');
+      throw new Error('PADDLE_API_KEY not configured');
     }
 
     const payload = {
@@ -116,9 +116,19 @@ class PaymentService {
       }
     };
 
-    console.log('🟣 Paddle request:', JSON.stringify(payload, null, 2));
+    console.log('🟣 Paddle API Key (first 20 chars):', paddleConfig.apiKey?.substring(0, 20));
+    console.log('🟣 Paddle Base URL:', paddleConfig.baseURL);
 
-    const response = await paddleClient.post('/transactions', payload);
+    // ✅ Create axios request directly with proper headers
+    const response = await axios({
+      method: 'POST',
+      url: `${paddleConfig.baseURL}/transactions`,
+      headers: {
+        'Authorization': `Bearer ${paddleConfig.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      data: payload
+    });
 
     console.log('🟣 Paddle response:', JSON.stringify(response.data, null, 2));
 
@@ -126,7 +136,7 @@ class PaymentService {
     const checkoutUrl = transaction.checkout?.url;
 
     if (!checkoutUrl) {
-      throw new Error('No checkout URL in Paddle response');
+      throw new Error('No checkout URL in response');
     }
 
     return {
