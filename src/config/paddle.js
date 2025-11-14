@@ -3,17 +3,22 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+const PADDLE_API_BASE = process.env.PADDLE_ENVIRONMENT === 'sandbox'
+  ? 'https://sandbox-api.paddle.com'
+  : 'https://api.paddle.com';
+
 const paddleClient = axios.create({
-  baseURL: 'https://vendors.paddle.com/api/2.0',
+  baseURL: PADDLE_API_BASE,
   headers: {
+    'Authorization': `Bearer ${process.env.PADDLE_API_KEY}`,
     'Content-Type': 'application/json'
   }
 });
 
 export const paddleConfig = {
-  vendorId: process.env.PADDLE_VENDOR_ID,
   apiKey: process.env.PADDLE_API_KEY,
-  publicKey: process.env.PADDLE_PUBLIC_KEY
+  environment: process.env.PADDLE_ENVIRONMENT || 'sandbox',
+  webhookSecret: process.env.PADDLE_WEBHOOK_SECRET
 };
 
 export default paddleClient;
