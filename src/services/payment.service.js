@@ -1,6 +1,7 @@
 import stripe from '../config/stripe.js';
 import paddleClient, { paddleConfig } from '../config/paddle.js';
 import pool from '../config/database.js';
+import axios from 'axios';
 
 class PaymentService {
 
