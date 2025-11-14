@@ -82,6 +82,14 @@ async createPaddlePayment(amount, currency, metadata) {
       throw new Error('PADDLE_API_KEY not configured');
     }
 
+    // ✅ DEBUG: Log the exact key format
+    console.log('🟣 API Key format check:', {
+      length: paddleConfig.apiKey.length,
+      firstChars: paddleConfig.apiKey.substring(0, 10),
+      hasSpaces: paddleConfig.apiKey.includes(' '),
+      hasNewlines: paddleConfig.apiKey.includes('\n')
+    });
+
     const payload = {
       items: [
         {
@@ -117,15 +125,14 @@ async createPaddlePayment(amount, currency, metadata) {
       }
     };
 
-    console.log('🟣 Paddle API Key (first 20 chars):', paddleConfig.apiKey?.substring(0, 20));
-    console.log('🟣 Paddle Base URL:', paddleConfig.baseURL);
+    // ✅ Trim any whitespace from API key
+    const apiKey = paddleConfig.apiKey.trim();
 
-    // ✅ Create axios request directly with proper headers
     const response = await axios({
       method: 'POST',
       url: `${paddleConfig.baseURL}/transactions`,
       headers: {
-        'Authorization': `Bearer ${paddleConfig.apiKey}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
       data: payload
@@ -152,38 +159,7 @@ async createPaddlePayment(amount, currency, metadata) {
     throw new Error(`Paddle payment failed: ${error.response?.data?.error?.detail || error.message}`);
   }
 }
-// async createPaddlePayment(amount, currency, metadata) {
-//   try {
-//     console.log('🟣 Creating Paddle payment:', { amount, currency, metadata });
 
-//     const response = await paddleClient.post('/product/generate_pay_link', {
-//       vendor_id: paddleConfig.vendorId,
-//       vendor_auth_code: paddleConfig.apiKey,
-//       prices: [`${currency}:${amount}`],
-//       customer_email: metadata.email || 'voter@vottery.com',
-//       passthrough: JSON.stringify({
-//         userId: metadata.userId,
-//         electionId: metadata.electionId,
-//         creatorId: metadata.creatorId,
-//         type: metadata.type
-//       }),
-//       return_url: `${process.env.FRONTEND_URL}/election/${metadata.electionId}/payment-success`,
-//       webhook_url: `${process.env.BACKEND_URL}/api/wallet/paddle/webhook`
-//     });
-
-//     console.log('✅ Paddle payment link created:', response.data.response.url);
-
-//     return {
-//       success: true,
-//       checkoutUrl: response.data.response.url,  // ← Changed from paymentUrl to checkoutUrl
-//       orderId: response.data.response.order_id,
-//       gateway: 'paddle'
-//     };
-//   } catch (error) {
-//     console.error('❌ Paddle error:', error);
-//     throw new Error(`Paddle payment failed: ${error.message}`);
-//   }
-// }
   
 
   // ✅ UPDATED: Process election participation payment with Paddle support
