@@ -684,113 +684,50 @@ async payForElection(req, res) {
     res.status(500).json({ error: error.message || 'Failed to process election payment' });
   }
 }
-  // async payForElection(req, res) {
-  //   try {
-  //     const userId = req.user.userId;
-  //     const { electionId, regionCode, paymentGateway = 'stripe' } = req.body; // ← Added paymentGateway
 
-  //     // Get user email for Paddle
-  //     const userResult = await pool.query(
-  //       `SELECT email FROM votteryy_user_details WHERE user_id = $1`,
-  //       [userId]
-  //     );
-  //     const userEmail = userResult.rows[0]?.email;
 
-  //     const electionResult = await pool.query(
-  //       `SELECT * FROM votteryyy_elections WHERE id = $1`,
-  //       [electionId]
-  //     );
+async confirmElectionPayment(req, res) {
+  try {
+    const { paymentIntentId, electionId } = req.body;
 
-  //     if (electionResult.rows.length === 0) {
-  //       return res.status(404).json({ error: 'Election not found' });
-  //     }
+    console.log('🔔 Confirmation request received:', { 
+      paymentIntentId, 
+      electionId,
+      hasSignature: !!req.headers['stripe-signature']
+    });
 
-  //     const election = electionResult.rows[0];
-
-  //     if (election.is_free) {
-  //       return res.status(400).json({ error: 'This election is free' });
-  //     }
-
-  //     let amount = 0;
-
-  //     if (election.pricing_type === 'general_fee') {
-  //       amount = parseFloat(election.general_participation_fee);
-  //     } else if (election.pricing_type === 'regional_fee') {
-  //       const regionalResult = await pool.query(
-  //         `SELECT participation_fee FROM votteryy_election_regional_pricing
-  //          WHERE election_id = $1 AND region_code = $2`,
-  //         [electionId, regionCode]
-  //       );
-
-  //       if (regionalResult.rows.length === 0) {
-  //         return res.status(400).json({ error: 'Regional pricing not configured for your region' });
-  //       }
-
-  //       amount = parseFloat(regionalResult.rows[0].participation_fee);
-  //     }
-
-  //     if (amount <= 0) {
-  //       return res.status(400).json({ error: 'Invalid participation fee' });
-  //     }
-
-  //     // ✅ Process payment with gateway parameter
-  //     const paymentResult = await paymentService.processElectionPayment(
-  //       userId,
-  //       electionId,
-  //       amount,
-  //       regionCode,
-  //       paymentGateway, // ← Pass gateway
-  //       userEmail       // ← Pass email for Paddle
-  //     );
-
-  //     res.json({
-  //       success: true,
-  //       payment: paymentResult.payment,
-  //       clientSecret: paymentResult.clientSecret,
-  //       checkoutUrl: paymentResult.checkoutUrl, // ← For Paddle
-  //       gateway: paymentResult.gateway
-  //     });
-
-  //   } catch (error) {
-  //     console.error('Pay for election error:', error);
-  //     res.status(500).json({ error: error.message || 'Failed to process election payment' });
-  //   }
-  // }
-
-  async confirmElectionPayment(req, res) {
-    try {
-      const { paymentIntentId, electionId } = req.body;
-
-      console.log('🔔 Webhook received:', { paymentIntentId, electionId });
-
-      const sig = req.headers['stripe-signature'];
-      if (sig && process.env.STRIPE_WEBHOOK_SECRET) {
-        try {
-          const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-          const event = stripe.webhooks.constructEvent(
-            req.body, 
-            sig, 
-            process.env.STRIPE_WEBHOOK_SECRET
-          );
-          console.log('✅ Webhook signature verified:', event.type);
-        } catch (err) {
-          console.error('⚠️ Webhook signature verification failed:', err.message);
-          return res.status(400).json({ error: 'Invalid signature' });
-        }
+    // ✅ Only verify signature if it's present (webhook call)
+    const sig = req.headers['stripe-signature'];
+    if (sig && process.env.STRIPE_WEBHOOK_SECRET) {
+      try {
+        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        const event = stripe.webhooks.constructEvent(
+          req.rawBody,  // Need raw body for webhooks
+          sig, 
+          process.env.STRIPE_WEBHOOK_SECRET
+        );
+        console.log('✅ Webhook signature verified:', event.type);
+      } catch (err) {
+        console.error('⚠️ Webhook signature verification failed:', err.message);
+        return res.status(400).json({ error: 'Invalid signature' });
       }
-
-      await paymentService.confirmPaymentAndBlock(paymentIntentId, electionId);
-
-      res.json({ 
-        success: true, 
-        message: 'Payment confirmed and funds blocked until election ends' 
-      });
-
-    } catch (error) {
-      console.error('Confirm election payment error:', error);
-      res.status(500).json({ error: 'Failed to confirm payment' });
+    } else {
+      console.log('ℹ️ No signature - treating as direct API call');
     }
+
+    // ✅ Confirm payment regardless of source
+    await paymentService.confirmPaymentAndBlock(paymentIntentId, electionId);
+
+    res.json({ 
+      success: true, 
+      message: 'Payment confirmed and funds blocked until election ends' 
+    });
+
+  } catch (error) {
+    console.error('❌ Confirm election payment error:', error);
+    res.status(500).json({ error: 'Failed to confirm payment' });
   }
+}
 
   // ✅ NEW: Paddle Webhook Handler
   async handlePaddleWebhook(req, res) {
