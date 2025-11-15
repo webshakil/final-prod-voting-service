@@ -78,70 +78,81 @@ async createPaddlePayment(amount, currency, metadata) {
   try {
     console.log('🟣 Creating Paddle payment:', { amount, currency, metadata });
 
-    // ✅ Use Paddle's overlay checkout with custom amount
-    const payload = {
-      items: [
-        {
-          quantity: 1,
-          price: {
-            description: `Election #${metadata.electionId} Participation Fee`,
-            name: 'Election Participation',
-            type: 'standard',
-            tax_mode: 'account_setting',
-            unit_price: {
-              amount: String(Math.round(amount * 100)), // Convert to cents
-              currency_code: currency.toUpperCase()
-            },
-            billing_cycle: null,
-            trial_period: null,
-            quantity: {
-              minimum: 1,
-              maximum: 1
-            }
-          }
-        }
-      ],
+    // ✅ CORRECT: Use /prices endpoint to create a one-time price, then /transactions
+    
+    // Step 1: Create a one-time price
+    const pricePayload = {
+      description: `Election #${metadata.electionId} Participation Fee`,
+      name: 'Election Participation',
+      type: 'standard',
+      billing_cycle: null,
+      trial_period: null,
+      tax_mode: 'account_setting',
+      unit_price: {
+        amount: String(Math.round(amount * 100)),
+        currency_code: currency.toUpperCase()
+      },
+      quantity: {
+        minimum: 1,
+        maximum: 1
+      }
+    };
+
+    const apiKey = paddleConfig.apiKey.trim();
+
+    console.log('🟣 Step 1: Creating price...');
+    
+    const priceResponse = await axios({
+      method: 'POST',
+      url: `${paddleConfig.baseURL}/prices`,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      data: pricePayload
+    });
+
+    const priceId = priceResponse.data.data.id;
+    console.log('✅ Price created:', priceId);
+
+    // Step 2: Create transaction with the price
+    const transactionPayload = {
+      items: [{
+        price_id: priceId,
+        quantity: 1
+      }],
       customer_email: metadata.email || 'voter@vottery.com',
       custom_data: {
         userId: String(metadata.userId),
         electionId: String(metadata.electionId),
         creatorId: String(metadata.creatorId),
         type: metadata.type
-      },
-      settings: {
-        success_url: `${process.env.FRONTEND_URL}/election/${metadata.electionId}/payment-success`,
-        notification_url: `${process.env.BACKEND_URL}/api/wallet/paddle/webhook`
       }
     };
 
-    console.log('🟣 Paddle payload:', JSON.stringify(payload, null, 2));
+    console.log('🟣 Step 2: Creating transaction...');
 
-    const apiKey = paddleConfig.apiKey.trim();
-
-    // ✅ Use /checkouts endpoint instead of /transactions
-    const response = await axios({
+    const transactionResponse = await axios({
       method: 'POST',
-      url: `${paddleConfig.baseURL}/checkouts`,
+      url: `${paddleConfig.baseURL}/transactions`,
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
-      data: payload
+      data: transactionPayload
     });
 
-    console.log('🟣 Paddle response:', JSON.stringify(response.data, null, 2));
+    console.log('✅ Paddle transaction response:', JSON.stringify(transactionResponse.data, null, 2));
 
-    const checkout = response.data.data;
-    const checkoutUrl = checkout.url;
-
-    if (!checkoutUrl) {
-      throw new Error('No checkout URL in response');
-    }
+    const transaction = transactionResponse.data.data;
+    
+    // Get checkout URL from transaction
+    const checkoutUrl = `https://buy.paddle.com/checkout/${transaction.id}`;
 
     return {
       success: true,
       checkoutUrl: checkoutUrl,
-      orderId: checkout.id,
+      orderId: transaction.id,
       gateway: 'paddle'
     };
 
