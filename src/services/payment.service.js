@@ -72,65 +72,56 @@ class PaymentService {
     }
   }
 
-  // ✅ UPDATED: Create Paddle payment
-  // ✅ CORRECTED: Create Paddle payment
+
+// createPaddlePayment
 async createPaddlePayment(amount, currency, metadata) {
   try {
     console.log('🟣 Creating Paddle payment:', { amount, currency, metadata });
 
-    if (!paddleConfig.apiKey) {
-      throw new Error('PADDLE_API_KEY not configured');
-    }
-
-    // ✅ DEBUG: Log the exact key format
-    console.log('🟣 API Key format check:', {
-      length: paddleConfig.apiKey.length,
-      firstChars: paddleConfig.apiKey.substring(0, 10),
-      hasSpaces: paddleConfig.apiKey.includes(' '),
-      hasNewlines: paddleConfig.apiKey.includes('\n')
-    });
-
+    // ✅ Use Paddle's overlay checkout with custom amount
     const payload = {
       items: [
         {
+          quantity: 1,
           price: {
             description: `Election #${metadata.electionId} Participation Fee`,
             name: 'Election Participation',
-            billing_cycle: null,
-            trial_period: null,
+            type: 'standard',
             tax_mode: 'account_setting',
             unit_price: {
-              amount: String(Math.round(amount * 100)),
+              amount: String(Math.round(amount * 100)), // Convert to cents
               currency_code: currency.toUpperCase()
             },
+            billing_cycle: null,
+            trial_period: null,
             quantity: {
               minimum: 1,
               maximum: 1
             }
-          },
-          quantity: 1
+          }
         }
       ],
-      customer: {
-        email: metadata.email || 'voter@vottery.com'
-      },
+      customer_email: metadata.email || 'voter@vottery.com',
       custom_data: {
         userId: String(metadata.userId),
         electionId: String(metadata.electionId),
         creatorId: String(metadata.creatorId),
         type: metadata.type
       },
-      checkout: {
-        url: `${process.env.FRONTEND_URL}/election/${metadata.electionId}/payment-success`
+      settings: {
+        success_url: `${process.env.FRONTEND_URL}/election/${metadata.electionId}/payment-success`,
+        notification_url: `${process.env.BACKEND_URL}/api/wallet/paddle/webhook`
       }
     };
 
-    // ✅ Trim any whitespace from API key
+    console.log('🟣 Paddle payload:', JSON.stringify(payload, null, 2));
+
     const apiKey = paddleConfig.apiKey.trim();
 
+    // ✅ Use /checkouts endpoint instead of /transactions
     const response = await axios({
       method: 'POST',
-      url: `${paddleConfig.baseURL}/transactions`,
+      url: `${paddleConfig.baseURL}/checkouts`,
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
@@ -140,8 +131,8 @@ async createPaddlePayment(amount, currency, metadata) {
 
     console.log('🟣 Paddle response:', JSON.stringify(response.data, null, 2));
 
-    const transaction = response.data.data;
-    const checkoutUrl = transaction.checkout?.url;
+    const checkout = response.data.data;
+    const checkoutUrl = checkout.url;
 
     if (!checkoutUrl) {
       throw new Error('No checkout URL in response');
@@ -150,12 +141,12 @@ async createPaddlePayment(amount, currency, metadata) {
     return {
       success: true,
       checkoutUrl: checkoutUrl,
-      orderId: transaction.id,
+      orderId: checkout.id,
       gateway: 'paddle'
     };
 
   } catch (error) {
-    console.error('❌ Paddle error:', error.response?.data || error.message);
+    console.error(' Paddle error:', error.response?.data || error.message);
     throw new Error(`Paddle payment failed: ${error.response?.data?.error?.detail || error.message}`);
   }
 }
