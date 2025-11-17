@@ -108,6 +108,181 @@ class LotteryController {
     }
   }
 
+  // Auto-draw lottery (cron job trigger)
+async autoDrawLottery(electionId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    console.log(`🎰 Auto-draw started for election ${electionId}`);
+
+    // Get election
+    const electionResult = await client.query(
+      `SELECT * FROM votteryyy_elections WHERE id = $1`,
+      [electionId]
+    );
+
+    if (electionResult.rows.length === 0) {
+      throw new Error('Election not found');
+    }
+
+    const election = electionResult.rows[0];
+    const now = new Date();
+    const endDate = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
+
+    if (now < endDate) {
+      throw new Error('Election not yet ended');
+    }
+
+    if (!election.lottery_enabled) {
+      throw new Error('Lottery not enabled');
+    }
+
+    // Check if already drawn
+    const existingDraw = await client.query(
+      `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+      [electionId]
+    );
+
+    if (existingDraw.rows.length > 0) {
+      throw new Error('Lottery already drawn');
+    }
+
+    // Select winners
+    const { winners, randomSeed, totalParticipants, prizeDistribution, totalPrizePool, rewardType } = 
+      await rngService.selectLotteryWinners(electionId, election.lottery_winner_count);
+
+    if (winners.length === 0) {
+      throw new Error('No participants found for lottery');
+    }
+
+    // Record lottery draw
+    const drawResult = await client.query(
+      `INSERT INTO votteryy_lottery_draws
+       (election_id, total_participants, winner_count, random_seed, status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING draw_id`,
+      [
+        electionId,
+        totalParticipants,
+        winners.length,
+        randomSeed,
+        'completed',
+        JSON.stringify({ prizeDistribution, totalPrizePool, autoDrawn: true })
+      ]
+    );
+
+    const drawId = drawResult.rows[0].draw_id;
+
+    // Calculate prizes and record winners
+    const prizeDistArray = prizeDistribution || [];
+    const winnerRecords = [];
+
+    for (let i = 0; i < winners.length; i++) {
+      const winner = winners[i];
+      const rank = i + 1;
+
+      let prizeAmount = 0;
+      let prizePercentage = 0;
+
+      if (rewardType === 'monetary' && prizeDistArray.length > 0) {
+        const distEntry = prizeDistArray.find(d => d.rank === rank);
+        if (distEntry) {
+          prizePercentage = distEntry.percentage;
+          prizeAmount = (totalPrizePool * prizePercentage) / 100;
+        } else {
+          prizeAmount = totalPrizePool / winners.length;
+          prizePercentage = 100 / winners.length;
+        }
+      }
+
+      const winnerResult = await client.query(
+        `INSERT INTO votteryy_lottery_winners
+         (election_id, user_id, ticket_id, rank, prize_amount, prize_percentage, prize_description, prize_type, claimed)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          electionId,
+          winner.user_id,
+          winner.ticket_id,
+          rank,
+          prizeAmount,
+          prizePercentage,
+          election.lottery_prize_description,
+          rewardType,
+          false
+        ]
+      );
+
+      winnerRecords.push(winnerResult.rows[0]);
+
+      // Credit wallet for monetary prizes
+      if (rewardType === 'monetary' && prizeAmount > 0) {
+        await client.query(
+          `INSERT INTO votteryy_user_wallets (user_id, balance)
+           VALUES ($1, $2)
+           ON CONFLICT (user_id)
+           DO UPDATE SET balance = votteryy_user_wallets.balance + $2`,
+          [winner.user_id, prizeAmount]
+        );
+
+        await client.query(
+          `INSERT INTO votteryy_wallet_transactions
+           (user_id, transaction_type, amount, election_id, status, description)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            winner.user_id,
+            'prize_won',
+            prizeAmount,
+            electionId,
+            'success',
+            `Auto Lottery Prize - Rank ${rank}`
+          ]
+        );
+      }
+
+      // Send notification
+      try {
+        const userResult = await client.query(
+          `SELECT email, full_name FROM votteryy_user_details WHERE user_id = $1`,
+          [winner.user_id]
+        );
+
+        if (userResult.rows.length > 0) {
+          const user = userResult.rows[0];
+          const prizeText = rewardType === 'monetary' 
+            ? `$${prizeAmount.toFixed(2)}`
+            : election.lottery_prize_description;
+
+          await notificationService.sendLotteryWinnerNotification(
+            user.email,
+            user.full_name,
+            election.title,
+            prizeText,
+            rank
+          );
+        }
+      } catch (emailError) {
+        console.error('Winner notification error:', emailError);
+      }
+    }
+
+    // Log audit (pass null for req since it's auto-draw)
+    await auditService.logLotteryDraw(electionId, winnerRecords, randomSeed, null);
+
+    await client.query('COMMIT');
+
+    console.log(`✅ Auto-drew lottery for election ${electionId}, ${winners.length} winners`);
+    return { success: true, drawId, winners: winnerRecords };
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`❌ Auto-draw lottery error for election ${electionId}:`, error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
   // Get user's lottery ticket
   async getUserTicket(req, res) {
     try {
@@ -160,9 +335,7 @@ class LotteryController {
   }
 
   // Get all lottery participants
-// Get all lottery participants
-// Get all lottery participants
-// Get all lottery participants
+
 async getLotteryParticipants(req, res) {
   try {
     const { electionId } = req.params;
@@ -279,7 +452,7 @@ async getLotteryParticipants(req, res) {
 
       // Verify admin role
       if (!req.user.roles.includes('admin') && !req.user.roles.includes('manager')) {
-        return res.status(403).json({ error: 'Admin access required' });
+        return res.status(403).json({ error: 'Admin access required shakil' });
       }
 
       // Get election
