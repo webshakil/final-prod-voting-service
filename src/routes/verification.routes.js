@@ -67,4 +67,9 @@ router.get(
   verificationController.verifyByReceipt
 );
 
+router.post(
+  '/verify/anonymous-vote',
+  verificationController.verifyAnonymousVote
+);
+
 export default router;

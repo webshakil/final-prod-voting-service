@@ -493,6 +493,27 @@ export function secureRandomNumber(min, max) {
   return min + (randomValue % range);
 }
 
+/**
+ * Generate cryptographically secure vote token for anonymous verification
+ * @returns {string} - 64-character hexadecimal token
+ */
+export function generateVoteToken() {
+  // Generate 32 bytes of cryptographically secure random data
+  // This gives us 2^256 possible values (extremely secure)
+  const token = crypto.randomBytes(32).toString('hex');
+  
+  // Add timestamp component for uniqueness guarantee
+  const timestamp = Date.now().toString(36);
+  
+  // Combine and hash to create final token
+  const finalToken = crypto.createHash('sha256')
+    .update(token + timestamp)
+    .digest('hex');
+  
+  console.log('🎫 Vote token generated');
+  return finalToken;
+}
+
 // ========================================
 // EXPORT ALL FUNCTIONS
 // ========================================
@@ -512,6 +533,8 @@ export default {
   generateVerificationCode,
   generateVoteId,
   generateLotteryTicket,
+
+  generateVoteToken, 
   
   // Digital Signatures
   signData,

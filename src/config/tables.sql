@@ -401,3 +401,53 @@ CREATE TABLE IF NOT EXISTS votteryy_wallets (
     updated_at TIMESTAMP DEFAULT NOW(),
     FOREIGN KEY (user_id) REFERENCES public.users(user_id) ON DELETE CASCADE
 );
+
+
+//to enable anonymous voting and abstensia voting
+CREATE TABLE IF NOT EXISTS public.votteryyy_voter_participation (
+    id SERIAL PRIMARY KEY,
+    election_id INTEGER NOT NULL,
+    user_id VARCHAR(255) NOT NULL,
+    has_voted BOOLEAN DEFAULT TRUE,
+    voting_session_id UUID DEFAULT gen_random_uuid(),
+    voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    UNIQUE(election_id, user_id),
+    FOREIGN KEY (election_id) REFERENCES public.votteryyy_elections(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_participation_election_user ON votteryyy_voter_participation(election_id, user_id);
+CREATE INDEX idx_participation_session ON votteryyy_voter_participation(voting_session_id);
+
+COMMENT ON TABLE votteryyy_voter_participation IS 'Tracks voter participation for double-vote prevention and lottery eligibility';
+
+
+
+
+
+
+CREATE TABLE IF NOT EXISTS public.votteryyy_anonymous_votes (
+    id SERIAL PRIMARY KEY,
+    voting_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    election_id INTEGER NOT NULL,
+    answers JSONB NOT NULL,
+    encrypted_vote TEXT NOT NULL,
+    vote_hash VARCHAR(64) NOT NULL,
+    receipt_id VARCHAR(100) UNIQUE NOT NULL,
+    verification_code VARCHAR(50) NOT NULL,
+    vote_token VARCHAR(255) UNIQUE NOT NULL,
+    ip_address INET,
+    user_agent TEXT,
+    voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (election_id) REFERENCES public.votteryyy_elections(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_anonymous_votes_election ON votteryyy_anonymous_votes(election_id);
+CREATE INDEX idx_anonymous_votes_token ON votteryyy_anonymous_votes(vote_token);
+CREATE INDEX idx_anonymous_votes_receipt ON votteryyy_anonymous_votes(receipt_id);
+CREATE INDEX idx_anonymous_votes_hash ON votteryyy_anonymous_votes(vote_hash);
+
+COMMENT ON TABLE votteryyy_anonymous_votes IS 'Stores anonymous votes without voter identity linkage';
+COMMENT ON COLUMN votteryyy_anonymous_votes.vote_token IS 'Cryptographically secure token for voter verification';
