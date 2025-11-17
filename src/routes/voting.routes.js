@@ -37,6 +37,12 @@ router.post(
   votingController.updateVideoProgress
 );
 
+// New route in voting.routes.js
+router.get(
+  '/elections/:electionId/live-results',
+  votingController.getLiveResults
+);
+
 // Record abstention
 router.post(
   '/elections/:electionId/abstain',
