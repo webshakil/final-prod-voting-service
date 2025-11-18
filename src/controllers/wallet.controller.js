@@ -13,7 +13,7 @@ class WalletController {
       const { electionId } = req.params;
 
       const voteResult = await pool.query(
-        `SELECT voting_id FROM votteryy_votings
+        `SELECT voting_id FROM votteryy_votes
          WHERE user_id = $1 AND election_id = $2
          LIMIT 1`,
         [userId, electionId]

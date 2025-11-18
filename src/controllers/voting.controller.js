@@ -714,18 +714,20 @@ export const castVote = async (req, res) => {
       }
 
       // Create lottery ticket if enabled
-      if (election.lottery_enabled) {
-        const ballNumber = parseInt(`${userId}${electionId}${Date.now()}`.slice(-6));
-        const ticketNumber = `TKT-${new Date().getFullYear()}-${String(ballNumber).padStart(6, '0')}`;
+if (election.lottery_enabled) {
+  const ballNumber = parseInt(`${userId}${electionId}${Date.now()}`.slice(-6));
+  const ticketNumber = `TKT-${new Date().getFullYear()}-${String(ballNumber).padStart(6, '0')}`;
 
-        await client.query(
-          `INSERT INTO votteryy_lottery_tickets 
-           (user_id, election_id, voting_id, ball_number, ticket_number)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (user_id, election_id) DO NOTHING`,
-          [String(userId), electionId, votingSessionId, ballNumber, ticketNumber]
-        );
-      }
+  await client.query(
+    `INSERT INTO votteryy_lottery_tickets 
+     (user_id, election_id, voting_id, ball_number, ticket_number)
+     VALUES ($1, $2, $3::uuid, $4, $5)
+     ON CONFLICT (user_id, election_id) DO NOTHING`,
+    [String(userId), electionId, votingUuid, ballNumber, ticketNumber] // ✅ votingUuid is UUID string
+  );
+  
+  console.log(`🎫 Lottery ticket created for normal vote: ${votingUuid}`);
+}
 
       // Audit event
       try {
@@ -886,18 +888,21 @@ export const castVote = async (req, res) => {
       }
 
       // Create lottery ticket if enabled
-      if (election.lottery_enabled) {
-        const ballNumber = parseInt(`${userId}${electionId}${Date.now()}`.slice(-6));
-        const ticketNumber = `TKT-${new Date().getFullYear()}-${String(ballNumber).padStart(6, '0')}`;
 
-        await client.query(
-          `INSERT INTO votteryy_lottery_tickets 
-           (user_id, election_id, voting_id, ball_number, ticket_number)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (user_id, election_id) DO NOTHING`,
-          [String(userId), electionId, votingUuid, ballNumber, ticketNumber]
-        );
-      }
+if (election.lottery_enabled) {
+  const ballNumber = parseInt(`${userId}${electionId}${Date.now()}`.slice(-6));
+  const ticketNumber = `TKT-${new Date().getFullYear()}-${String(ballNumber).padStart(6, '0')}`;
+
+  await client.query(
+    `INSERT INTO votteryy_lottery_tickets 
+     (user_id, election_id, voting_id, ball_number, ticket_number)
+     VALUES ($1, $2, $3::uuid, $4, $5)
+     ON CONFLICT (user_id, election_id) DO NOTHING`,
+    [String(userId), electionId, votingUuid, ballNumber, ticketNumber] // ✅ votingUuid is UUID string
+  );
+  
+  console.log(`🎫 Lottery ticket created for anonymous vote: ${votingUuid}`);
+}
 
       // Audit event
       try {
@@ -1351,32 +1356,7 @@ export const getUserVote = async (req, res) => {
     res.status(500).json({ error: 'Failed to get vote' });
   }
 };
-// export const getUserVote = async (req, res) => {
-//   try {
-//     const { electionId } = req.params;
-//     const userId = req.user?.userId || req.headers['x-user-id'];
 
-//     if (!userId) {
-//       return res.status(401).json({ error: 'Authentication required' });
-//     }
-
-//     const voteResult = await pool.query(
-//       `SELECT * FROM votteryy_votes
-//        WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-//       [electionId, userId]
-//     );
-
-//     if (voteResult.rows.length === 0) {
-//       return res.status(404).json({ error: 'Vote not found' });
-//     }
-
-//     res.json(voteResult.rows[0]);
-
-//   } catch (error) {
-//     console.error('Get user vote error:', error);
-//     res.status(500).json({ error: 'Failed to get vote' });
-//   }
-// };
 
 // ========================================
 // GET VOTING HISTORY
@@ -1572,43 +1552,7 @@ export const getVoteAuditLogs = async (req, res) => {
     });
   }
 };
-// export const getVoteAuditLogs = async (req, res) => {
-//   try {
-//     const { electionId } = req.params;
-//     const { flaggedOnly = true } = req.query;
 
-//     console.log(`📋 Retrieving audit logs for election ${electionId}`);
-
-//     let query = `
-//       SELECT 
-//         a.*,
-//         e.title as election_title,
-//         u.email as user_email
-//       FROM votteryy_vote_audit a
-//       LEFT JOIN votteryyy_elections e ON a.election_id = e.id
-//       LEFT JOIN votteryy_users u ON a.user_id::integer = u.id
-//       WHERE a.election_id = $1
-//     `;
-
-//     if (flaggedOnly === 'true') {
-//       query += ` AND a.flagged_for_review = TRUE`;
-//     }
-
-//     query += ` ORDER BY a.attempted_at DESC`;
-
-//     const result = await pool.query(query, [electionId]);
-
-//     res.json({
-//       success: true,
-//       auditLogs: result.rows,
-//       count: result.rows.length
-//     });
-
-//   } catch (error) {
-//     console.error('❌ Get audit logs error:', error);
-//     res.status(500).json({ error: 'Failed to get audit logs' });
-//   }
-// };
 
 export default {
   getBallot,
