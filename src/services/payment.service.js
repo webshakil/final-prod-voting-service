@@ -356,251 +356,527 @@ class PaymentService {
     }
   }
 
+
+
+
+
+
+
+
+
+
   // ✅ FIXED: Confirm payment with proper transaction recording
-  async confirmPaymentAndBlock(paymentIntentId, electionId) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
 
-      console.log('🔔 Confirming payment:', { paymentIntentId, electionId });
+async confirmPaymentAndBlock(paymentIntentId, electionId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-      // Get payment record (works for both payment_intent_id and gateway_transaction_id)
-      const paymentResult = await client.query(
-        `SELECT * FROM votteryy_election_payments
-         WHERE (payment_intent_id = $1 OR gateway_transaction_id = $1)
-         AND election_id = $2`,
-        [paymentIntentId, electionId]
-      );
+    console.log('🔔 Confirming payment:', { paymentIntentId, electionId });
 
-      if (paymentResult.rows.length === 0) {
-        throw new Error('Payment not found');
-      }
+    // Get payment record (works for both payment_intent_id and gateway_transaction_id)
+    const paymentResult = await client.query(
+      `SELECT * FROM votteryy_election_payments
+       WHERE (payment_intent_id = $1 OR gateway_transaction_id = $1)
+       AND election_id = $2`,
+      [paymentIntentId, electionId]
+    );
 
-      const payment = paymentResult.rows[0];
+    if (paymentResult.rows.length === 0) {
+      throw new Error('Payment not found');
+    }
 
-      // Already succeeded? Skip
-      if (payment.status === 'succeeded') {
-        console.log('⚠️ Payment already confirmed');
-        await client.query('ROLLBACK');
-        return { success: true, alreadyProcessed: true };
-      }
+    const payment = paymentResult.rows[0];
 
-      // ✅ Get election details including title
-      const electionResult = await client.query(
-        `SELECT creator_id, title, end_date, end_time FROM votteryyy_elections WHERE id = $1`,
-        [electionId]
-      );
+    // ✅ FIX: Convert amount to number
+    const amount = parseFloat(payment.amount);
+    
+    if (isNaN(amount)) {
+      throw new Error('Invalid payment amount');
+    }
 
-      if (electionResult.rows.length === 0) {
-        throw new Error('Election not found');
-      }
+    // Already succeeded? Skip
+    if (payment.status === 'succeeded') {
+      console.log('⚠️ Payment already confirmed');
+      await client.query('ROLLBACK');
+      return { success: true, alreadyProcessed: true };
+    }
 
-      const election = electionResult.rows[0];
-      const creatorId = election.creator_id;
-      
-      // ✅ Calculate lock date
-      let lockedUntil;
-      if (election.end_date) {
-        lockedUntil = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
-        if (isNaN(lockedUntil.getTime())) {
-          lockedUntil = new Date();
-          lockedUntil.setDate(lockedUntil.getDate() + 30);
-        }
-      } else {
+    // ✅ Get election details including title
+    const electionResult = await client.query(
+      `SELECT creator_id, title, end_date, end_time FROM votteryyy_elections WHERE id = $1`,
+      [electionId]
+    );
+
+    if (electionResult.rows.length === 0) {
+      throw new Error('Election not found');
+    }
+
+    const election = electionResult.rows[0];
+    const creatorId = election.creator_id;
+    
+    // ✅ Calculate lock date
+    let lockedUntil;
+    if (election.end_date) {
+      lockedUntil = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
+      if (isNaN(lockedUntil.getTime())) {
         lockedUntil = new Date();
         lockedUntil.setDate(lockedUntil.getDate() + 30);
       }
-
-      console.log('👤 Creator ID:', creatorId);
-      console.log('🔒 Locked until:', lockedUntil);
-
-      // ✅ GET CREATOR'S PLATFORM FEE (or use 5% default)
-      const processingFeeConfig = await this.getUserProcessingFee(creatorId);
-      
-      // ✅ Calculate fees based on gateway
-      let gatewayFee, platformFee, netAmount;
-      
-      if (payment.gateway_used === 'paddle') {
-        // Paddle: 5% + $0.50
-        gatewayFee = (payment.amount * 0.05) + 0.50;
-        platformFee = this.calculateProcessingFee(payment.amount, processingFeeConfig);
-        netAmount = payment.amount - gatewayFee - platformFee;
-
-        console.log('\n💰 PAYMENT BREAKDOWN (Paddle):');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`Voter Paid:           $${payment.amount.toFixed(2)}`);
-        console.log(`- Paddle Fee (5%+$0.50): -$${gatewayFee.toFixed(2)}`);
-        console.log(`- Platform Fee (${processingFeeConfig.percentage}%):    -$${platformFee.toFixed(2)}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`Creator Receives:     $${netAmount.toFixed(2)} (FROZEN)`);
-        console.log(`Locked Until:         ${lockedUntil.toLocaleString()}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        await client.query(
-          `UPDATE votteryy_election_payments
-           SET status = 'succeeded', 
-               paddle_fee = $1,
-               platform_fee = $2,
-               net_amount = $3,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = $4`,
-          [gatewayFee, platformFee, netAmount, payment.id]
-        );
-      } else {
-        // Stripe: 2.9% + $0.30
-        gatewayFee = (payment.amount * 0.029) + 0.30;
-        platformFee = this.calculateProcessingFee(payment.amount, processingFeeConfig);
-        netAmount = payment.amount - gatewayFee - platformFee;
-
-        console.log('\n💰 PAYMENT BREAKDOWN (Stripe):');
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`Voter Paid:           $${payment.amount.toFixed(2)}`);
-        console.log(`- Stripe Fee (2.9%+$0.30): -$${gatewayFee.toFixed(2)}`);
-        console.log(`- Platform Fee (${processingFeeConfig.percentage}%):    -$${platformFee.toFixed(2)}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-        console.log(`Creator Receives:     $${netAmount.toFixed(2)} (FROZEN)`);
-        console.log(`Locked Until:         ${lockedUntil.toLocaleString()}`);
-        console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-        await client.query(
-          `UPDATE votteryy_election_payments
-           SET status = 'succeeded', 
-               stripe_fee = $1,
-               platform_fee = $2,
-               net_amount = $3,
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = $4`,
-          [gatewayFee, platformFee, netAmount, payment.id]
-        );
-      }
-
-      // ✅ Ensure creator has a wallet
-      await client.query(
-        `INSERT INTO votteryy_wallets (user_id, balance, blocked_balance, currency)
-         VALUES ($1, 0, 0, 'USD')
-         ON CONFLICT (user_id) DO NOTHING`,
-        [creatorId]
-      );
-
-      // ✅ Add to creator's BLOCKED balance (NOT available - frozen until election ends)
-      await client.query(
-        `UPDATE votteryy_wallets
-         SET blocked_balance = blocked_balance + $1,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = $2`,
-        [netAmount, creatorId]
-      );
-
-      console.log(`🔒 FROZEN: $${netAmount.toFixed(2)} added to creator's blocked balance`);
-      console.log(`📅 Will be released when election ends: ${lockedUntil.toLocaleString()}\n`);
-
-      // ✅ Create blocked account record
-      if (payment.gateway_used === 'paddle') {
-        await client.query(
-          `INSERT INTO votteryy_blocked_accounts
-           (user_id, election_id, amount, paddle_fee, platform_fee, status, locked_until)
-           VALUES ($1, $2, $3, $4, $5, 'locked', $6)
-           ON CONFLICT (user_id, election_id) 
-           DO UPDATE SET 
-             amount = votteryy_blocked_accounts.amount + $3,
-             paddle_fee = COALESCE(votteryy_blocked_accounts.paddle_fee, 0) + $4,
-             platform_fee = votteryy_blocked_accounts.platform_fee + $5`,
-          [creatorId, electionId, netAmount, gatewayFee, platformFee, lockedUntil]
-        );
-      } else {
-        await client.query(
-          `INSERT INTO votteryy_blocked_accounts
-           (user_id, election_id, amount, stripe_fee, platform_fee, status, locked_until)
-           VALUES ($1, $2, $3, $4, $5, 'locked', $6)
-           ON CONFLICT (user_id, election_id) 
-           DO UPDATE SET 
-             amount = votteryy_blocked_accounts.amount + $3,
-             stripe_fee = votteryy_blocked_accounts.stripe_fee + $4,
-             platform_fee = votteryy_blocked_accounts.platform_fee + $5`,
-          [creatorId, electionId, netAmount, gatewayFee, platformFee, lockedUntil]
-        );
-      }
-
-      // ✅ Record transaction for CREATOR with detailed breakdown
-      const creatorDescription = payment.gateway_used === 'paddle'
-        ? `Revenue from "${election.title}" - Voter paid $${payment.amount.toFixed(2)} | Paddle fee: -$${gatewayFee.toFixed(2)} | Platform fee: -$${platformFee.toFixed(2)} | Net earnings: $${netAmount.toFixed(2)} (FROZEN until ${lockedUntil.toLocaleDateString()})`
-        : `Revenue from "${election.title}" - Voter paid $${payment.amount.toFixed(2)} | Stripe fee: -$${gatewayFee.toFixed(2)} | Platform fee: -$${platformFee.toFixed(2)} | Net earnings: $${netAmount.toFixed(2)} (FROZEN until ${lockedUntil.toLocaleDateString()})`;
-
-      await client.query(
-        `INSERT INTO votteryy_transactions
-         (user_id, transaction_type, amount, net_amount, ${payment.gateway_used === 'paddle' ? 'paddle_fee' : 'stripe_fee'}, platform_fee, status, description, election_id, metadata, created_at)
-         VALUES ($1, 'election_revenue', $2, $3, $4, $5, 'success', $6, $7, $8, CURRENT_TIMESTAMP)`,
-        [
-          creatorId,
-          payment.amount,
-          netAmount,
-          gatewayFee,
-          platformFee,
-          creatorDescription,
-          electionId,
-          JSON.stringify({
-            voterPaid: payment.amount,
-            gatewayFee: gatewayFee,
-            platformFee: platformFee,
-            netAmount: netAmount,
-            gateway: payment.gateway_used,
-            locked: true,
-            lockedUntil: lockedUntil,
-            platformFeePercent: processingFeeConfig.percentage
-          })
-        ]
-      );
-
-      console.log('✅ Creator transaction recorded');
-
-      // ✅ Record transaction for VOTER
-      const voterDescription = `Paid $${payment.amount.toFixed(2)} to participate in "${election.title}"`;
-
-      await client.query(
-        `INSERT INTO votteryy_transactions
-         (user_id, transaction_type, amount, net_amount, status, description, election_id, metadata, created_at)
-         VALUES ($1, 'election_participation_fee', $2, $3, 'success', $4, $5, $6, CURRENT_TIMESTAMP)`,
-        [
-          payment.user_id,
-          payment.amount,
-          payment.amount,
-          voterDescription,
-          electionId,
-          JSON.stringify({
-            amountPaid: payment.amount,
-            gateway: payment.gateway_used,
-            paymentId: payment.id,
-            electionId: electionId,
-            electionTitle: election.title
-          })
-        ]
-      );
-
-      console.log('✅ Voter transaction recorded');
-
-      await client.query('COMMIT');
-
-      console.log('✅ Payment confirmed successfully!\n');
-
-      return { 
-        success: true, 
-        payment, 
-        breakdown: {
-          voterPaid: payment.amount,
-          gatewayFee,
-          platformFee,
-          creatorReceives: netAmount,
-          lockedUntil
-        }
-      };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      console.error('❌ Confirm payment error:', error);
-      throw error;
-    } finally {
-      client.release();
+    } else {
+      lockedUntil = new Date();
+      lockedUntil.setDate(lockedUntil.getDate() + 30);
     }
+
+    console.log('👤 Creator ID:', creatorId);
+    console.log('🔒 Locked until:', lockedUntil);
+
+    // ✅ GET CREATOR'S PLATFORM FEE (or use 5% default)
+    const processingFeeConfig = await this.getUserProcessingFee(creatorId);
+    
+    // ✅ Calculate fees based on gateway (using parsed amount)
+    let gatewayFee, platformFee, netAmount;
+    
+    if (payment.gateway_used === 'paddle') {
+      // Paddle: 5% + $0.50
+      gatewayFee = (amount * 0.05) + 0.50;
+      platformFee = this.calculateProcessingFee(amount, processingFeeConfig);
+      netAmount = amount - gatewayFee - platformFee;
+
+      console.log('\n💰 PAYMENT BREAKDOWN (Paddle):');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`Voter Paid:           $${amount.toFixed(2)}`);
+      console.log(`- Paddle Fee (5%+$0.50): -$${gatewayFee.toFixed(2)}`);
+      console.log(`- Platform Fee (${processingFeeConfig.percentage}%):    -$${platformFee.toFixed(2)}`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`Creator Receives:     $${netAmount.toFixed(2)} (FROZEN)`);
+      console.log(`Locked Until:         ${lockedUntil.toLocaleString()}`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+      await client.query(
+        `UPDATE votteryy_election_payments
+         SET status = 'succeeded', 
+             paddle_fee = $1,
+             platform_fee = $2,
+             net_amount = $3,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4`,
+        [gatewayFee, platformFee, netAmount, payment.id]
+      );
+    } else {
+      // Stripe: 2.9% + $0.30
+      gatewayFee = (amount * 0.029) + 0.30;
+      platformFee = this.calculateProcessingFee(amount, processingFeeConfig);
+      netAmount = amount - gatewayFee - platformFee;
+
+      console.log('\n💰 PAYMENT BREAKDOWN (Stripe):');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`Voter Paid:           $${amount.toFixed(2)}`);
+      console.log(`- Stripe Fee (2.9%+$0.30): -$${gatewayFee.toFixed(2)}`);
+      console.log(`- Platform Fee (${processingFeeConfig.percentage}%):    -$${platformFee.toFixed(2)}`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log(`Creator Receives:     $${netAmount.toFixed(2)} (FROZEN)`);
+      console.log(`Locked Until:         ${lockedUntil.toLocaleString()}`);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+      await client.query(
+        `UPDATE votteryy_election_payments
+         SET status = 'succeeded', 
+             stripe_fee = $1,
+             platform_fee = $2,
+             net_amount = $3,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4`,
+        [gatewayFee, platformFee, netAmount, payment.id]
+      );
+    }
+
+    // ✅ Ensure creator has a wallet
+    await client.query(
+      `INSERT INTO votteryy_wallets (user_id, balance, blocked_balance, currency)
+       VALUES ($1, 0, 0, 'USD')
+       ON CONFLICT (user_id) DO NOTHING`,
+      [creatorId]
+    );
+
+    // ✅ Add to creator's BLOCKED balance (NOT available - frozen until election ends)
+    await client.query(
+      `UPDATE votteryy_wallets
+       SET blocked_balance = blocked_balance + $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $2`,
+      [netAmount, creatorId]
+    );
+
+    console.log(`🔒 FROZEN: $${netAmount.toFixed(2)} added to creator's blocked balance`);
+    console.log(`📅 Will be released when election ends: ${lockedUntil.toLocaleString()}\n`);
+
+    // ✅ Create blocked account record
+    if (payment.gateway_used === 'paddle') {
+      await client.query(
+        `INSERT INTO votteryy_blocked_accounts
+         (user_id, election_id, amount, paddle_fee, platform_fee, status, locked_until)
+         VALUES ($1, $2, $3, $4, $5, 'locked', $6)
+         ON CONFLICT (user_id, election_id) 
+         DO UPDATE SET 
+           amount = votteryy_blocked_accounts.amount + $3,
+           paddle_fee = COALESCE(votteryy_blocked_accounts.paddle_fee, 0) + $4,
+           platform_fee = votteryy_blocked_accounts.platform_fee + $5`,
+        [creatorId, electionId, netAmount, gatewayFee, platformFee, lockedUntil]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO votteryy_blocked_accounts
+         (user_id, election_id, amount, stripe_fee, platform_fee, status, locked_until)
+         VALUES ($1, $2, $3, $4, $5, 'locked', $6)
+         ON CONFLICT (user_id, election_id) 
+         DO UPDATE SET 
+           amount = votteryy_blocked_accounts.amount + $3,
+           stripe_fee = votteryy_blocked_accounts.stripe_fee + $4,
+           platform_fee = votteryy_blocked_accounts.platform_fee + $5`,
+        [creatorId, electionId, netAmount, gatewayFee, platformFee, lockedUntil]
+      );
+    }
+
+    // ✅ Record transaction for CREATOR with detailed breakdown (using parsed amount)
+    const creatorDescription = payment.gateway_used === 'paddle'
+      ? `Revenue from "${election.title}" - Voter paid $${amount.toFixed(2)} | Paddle fee: -$${gatewayFee.toFixed(2)} | Platform fee: -$${platformFee.toFixed(2)} | Net earnings: $${netAmount.toFixed(2)} (FROZEN until ${lockedUntil.toLocaleDateString()})`
+      : `Revenue from "${election.title}" - Voter paid $${amount.toFixed(2)} | Stripe fee: -$${gatewayFee.toFixed(2)} | Platform fee: -$${platformFee.toFixed(2)} | Net earnings: $${netAmount.toFixed(2)} (FROZEN until ${lockedUntil.toLocaleDateString()})`;
+
+    await client.query(
+      `INSERT INTO votteryy_transactions
+       (user_id, transaction_type, amount, net_amount, ${payment.gateway_used === 'paddle' ? 'paddle_fee' : 'stripe_fee'}, platform_fee, status, description, election_id, metadata, created_at)
+       VALUES ($1, 'election_revenue', $2, $3, $4, $5, 'success', $6, $7, $8, CURRENT_TIMESTAMP)`,
+      [
+        creatorId,
+        amount, // Use parsed amount
+        netAmount,
+        gatewayFee,
+        platformFee,
+        creatorDescription,
+        electionId,
+        JSON.stringify({
+          voterPaid: amount,
+          gatewayFee: gatewayFee,
+          platformFee: platformFee,
+          netAmount: netAmount,
+          gateway: payment.gateway_used,
+          locked: true,
+          lockedUntil: lockedUntil,
+          platformFeePercent: processingFeeConfig.percentage
+        })
+      ]
+    );
+
+    console.log('✅ Creator transaction recorded');
+  // async confirmPaymentAndBlock(paymentIntentId, electionId) {
+  //   const client = await pool.connect();
+  //   try {
+  //     await client.query('BEGIN');
+
+  //     console.log('🔔 Confirming payment:', { paymentIntentId, electionId });
+
+  //     // Get payment record (works for both payment_intent_id and gateway_transaction_id)
+  //     const paymentResult = await client.query(
+  //       `SELECT * FROM votteryy_election_payments
+  //        WHERE (payment_intent_id = $1 OR gateway_transaction_id = $1)
+  //        AND election_id = $2`,
+  //       [paymentIntentId, electionId]
+  //     );
+
+  //     if (paymentResult.rows.length === 0) {
+  //       throw new Error('Payment not found');
+  //     }
+
+  //     const payment = paymentResult.rows[0];
+
+  //     // Already succeeded? Skip
+  //     if (payment.status === 'succeeded') {
+  //       console.log('⚠️ Payment already confirmed');
+  //       await client.query('ROLLBACK');
+  //       return { success: true, alreadyProcessed: true };
+  //     }
+
+  //     // ✅ Get election details including title
+  //     const electionResult = await client.query(
+  //       `SELECT creator_id, title, end_date, end_time FROM votteryyy_elections WHERE id = $1`,
+  //       [electionId]
+  //     );
+
+  //     if (electionResult.rows.length === 0) {
+  //       throw new Error('Election not found');
+  //     }
+
+  //     const election = electionResult.rows[0];
+  //     const creatorId = election.creator_id;
+      
+  //     // ✅ Calculate lock date
+  //     let lockedUntil;
+  //     if (election.end_date) {
+  //       lockedUntil = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
+  //       if (isNaN(lockedUntil.getTime())) {
+  //         lockedUntil = new Date();
+  //         lockedUntil.setDate(lockedUntil.getDate() + 30);
+  //       }
+  //     } else {
+  //       lockedUntil = new Date();
+  //       lockedUntil.setDate(lockedUntil.getDate() + 30);
+  //     }
+
+  //     console.log('👤 Creator ID:', creatorId);
+  //     console.log('🔒 Locked until:', lockedUntil);
+
+  //     // ✅ GET CREATOR'S PLATFORM FEE (or use 5% default)
+  //     const processingFeeConfig = await this.getUserProcessingFee(creatorId);
+      
+  //     // ✅ Calculate fees based on gateway
+  //     let gatewayFee, platformFee, netAmount;
+      
+  //     if (payment.gateway_used === 'paddle') {
+  //       // Paddle: 5% + $0.50
+  //       gatewayFee = (payment.amount * 0.05) + 0.50;
+  //       platformFee = this.calculateProcessingFee(payment.amount, processingFeeConfig);
+  //       netAmount = payment.amount - gatewayFee - platformFee;
+
+  //       console.log('\n💰 PAYMENT BREAKDOWN (Paddle):');
+  //       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  //       console.log(`Voter Paid:           $${payment.amount.toFixed(2)}`);
+  //       console.log(`- Paddle Fee (5%+$0.50): -$${gatewayFee.toFixed(2)}`);
+  //       console.log(`- Platform Fee (${processingFeeConfig.percentage}%):    -$${platformFee.toFixed(2)}`);
+  //       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  //       console.log(`Creator Receives:     $${netAmount.toFixed(2)} (FROZEN)`);
+  //       console.log(`Locked Until:         ${lockedUntil.toLocaleString()}`);
+  //       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  //       await client.query(
+  //         `UPDATE votteryy_election_payments
+  //          SET status = 'succeeded', 
+  //              paddle_fee = $1,
+  //              platform_fee = $2,
+  //              net_amount = $3,
+  //              updated_at = CURRENT_TIMESTAMP
+  //          WHERE id = $4`,
+  //         [gatewayFee, platformFee, netAmount, payment.id]
+  //       );
+  //     } else {
+  //       // Stripe: 2.9% + $0.30
+  //       gatewayFee = (payment.amount * 0.029) + 0.30;
+  //       platformFee = this.calculateProcessingFee(payment.amount, processingFeeConfig);
+  //       netAmount = payment.amount - gatewayFee - platformFee;
+
+  //       console.log('\n💰 PAYMENT BREAKDOWN (Stripe):');
+  //       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  //       console.log(`Voter Paid:           $${payment.amount.toFixed(2)}`);
+  //       console.log(`- Stripe Fee (2.9%+$0.30): -$${gatewayFee.toFixed(2)}`);
+  //       console.log(`- Platform Fee (${processingFeeConfig.percentage}%):    -$${platformFee.toFixed(2)}`);
+  //       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  //       console.log(`Creator Receives:     $${netAmount.toFixed(2)} (FROZEN)`);
+  //       console.log(`Locked Until:         ${lockedUntil.toLocaleString()}`);
+  //       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+  //       await client.query(
+  //         `UPDATE votteryy_election_payments
+  //          SET status = 'succeeded', 
+  //              stripe_fee = $1,
+  //              platform_fee = $2,
+  //              net_amount = $3,
+  //              updated_at = CURRENT_TIMESTAMP
+  //          WHERE id = $4`,
+  //         [gatewayFee, platformFee, netAmount, payment.id]
+  //       );
+  //     }
+
+  //     // ✅ Ensure creator has a wallet
+  //     await client.query(
+  //       `INSERT INTO votteryy_wallets (user_id, balance, blocked_balance, currency)
+  //        VALUES ($1, 0, 0, 'USD')
+  //        ON CONFLICT (user_id) DO NOTHING`,
+  //       [creatorId]
+  //     );
+
+  //     // ✅ Add to creator's BLOCKED balance (NOT available - frozen until election ends)
+  //     await client.query(
+  //       `UPDATE votteryy_wallets
+  //        SET blocked_balance = blocked_balance + $1,
+  //            updated_at = CURRENT_TIMESTAMP
+  //        WHERE user_id = $2`,
+  //       [netAmount, creatorId]
+  //     );
+
+  //     console.log(`🔒 FROZEN: $${netAmount.toFixed(2)} added to creator's blocked balance`);
+  //     console.log(`📅 Will be released when election ends: ${lockedUntil.toLocaleString()}\n`);
+
+  //     // ✅ Create blocked account record
+  //     if (payment.gateway_used === 'paddle') {
+  //       await client.query(
+  //         `INSERT INTO votteryy_blocked_accounts
+  //          (user_id, election_id, amount, paddle_fee, platform_fee, status, locked_until)
+  //          VALUES ($1, $2, $3, $4, $5, 'locked', $6)
+  //          ON CONFLICT (user_id, election_id) 
+  //          DO UPDATE SET 
+  //            amount = votteryy_blocked_accounts.amount + $3,
+  //            paddle_fee = COALESCE(votteryy_blocked_accounts.paddle_fee, 0) + $4,
+  //            platform_fee = votteryy_blocked_accounts.platform_fee + $5`,
+  //         [creatorId, electionId, netAmount, gatewayFee, platformFee, lockedUntil]
+  //       );
+  //     } else {
+  //       await client.query(
+  //         `INSERT INTO votteryy_blocked_accounts
+  //          (user_id, election_id, amount, stripe_fee, platform_fee, status, locked_until)
+  //          VALUES ($1, $2, $3, $4, $5, 'locked', $6)
+  //          ON CONFLICT (user_id, election_id) 
+  //          DO UPDATE SET 
+  //            amount = votteryy_blocked_accounts.amount + $3,
+  //            stripe_fee = votteryy_blocked_accounts.stripe_fee + $4,
+  //            platform_fee = votteryy_blocked_accounts.platform_fee + $5`,
+  //         [creatorId, electionId, netAmount, gatewayFee, platformFee, lockedUntil]
+  //       );
+  //     }
+
+  //     // ✅ Record transaction for CREATOR with detailed breakdown
+  //     const creatorDescription = payment.gateway_used === 'paddle'
+  //       ? `Revenue from "${election.title}" - Voter paid $${payment.amount.toFixed(2)} | Paddle fee: -$${gatewayFee.toFixed(2)} | Platform fee: -$${platformFee.toFixed(2)} | Net earnings: $${netAmount.toFixed(2)} (FROZEN until ${lockedUntil.toLocaleDateString()})`
+  //       : `Revenue from "${election.title}" - Voter paid $${payment.amount.toFixed(2)} | Stripe fee: -$${gatewayFee.toFixed(2)} | Platform fee: -$${platformFee.toFixed(2)} | Net earnings: $${netAmount.toFixed(2)} (FROZEN until ${lockedUntil.toLocaleDateString()})`;
+
+  //     await client.query(
+  //       `INSERT INTO votteryy_transactions
+  //        (user_id, transaction_type, amount, net_amount, ${payment.gateway_used === 'paddle' ? 'paddle_fee' : 'stripe_fee'}, platform_fee, status, description, election_id, metadata, created_at)
+  //        VALUES ($1, 'election_revenue', $2, $3, $4, $5, 'success', $6, $7, $8, CURRENT_TIMESTAMP)`,
+  //       [
+  //         creatorId,
+  //         payment.amount,
+  //         netAmount,
+  //         gatewayFee,
+  //         platformFee,
+  //         creatorDescription,
+  //         electionId,
+  //         JSON.stringify({
+  //           voterPaid: payment.amount,
+  //           gatewayFee: gatewayFee,
+  //           platformFee: platformFee,
+  //           netAmount: netAmount,
+  //           gateway: payment.gateway_used,
+  //           locked: true,
+  //           lockedUntil: lockedUntil,
+  //           platformFeePercent: processingFeeConfig.percentage
+  //         })
+  //       ]
+  //     );
+
+  //     console.log('✅ Creator transaction recorded');
+
+
+
+
+const voterDescription = `Paid $${amount.toFixed(2)} to participate in "${election.title}"`;
+
+    await client.query(
+      `INSERT INTO votteryy_transactions
+       (user_id, transaction_type, amount, net_amount, status, description, election_id, metadata, created_at)
+       VALUES ($1, 'election_participation_fee', $2, $3, 'success', $4, $5, $6, CURRENT_TIMESTAMP)`,
+      [
+        payment.user_id,
+        amount, // Use parsed amount
+        amount, // Voter pays full amount
+        voterDescription,
+        electionId,
+        JSON.stringify({
+          amountPaid: amount,
+          gateway: payment.gateway_used,
+          paymentId: payment.id,
+          electionId: electionId,
+          electionTitle: election.title
+        })
+      ]
+    );
+
+    console.log('✅ Voter transaction recorded');
+
+    await client.query('COMMIT');
+
+    console.log('✅ Payment confirmed successfully!\n');
+
+    return { 
+      success: true, 
+      payment, 
+      breakdown: {
+        voterPaid: amount,
+        gatewayFee,
+        platformFee,
+        creatorReceives: netAmount,
+        lockedUntil
+      }
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Confirm payment error:', error);
+    throw error;
+  } finally {
+    client.release();
   }
+}
+
+
+
+
+
+
+
+
+
+  //     // ✅ Record transaction for VOTER
+  //     const voterDescription = `Paid $${payment.amount.toFixed(2)} to participate in "${election.title}"`;
+
+  //     await client.query(
+  //       `INSERT INTO votteryy_transactions
+  //        (user_id, transaction_type, amount, net_amount, status, description, election_id, metadata, created_at)
+  //        VALUES ($1, 'election_participation_fee', $2, $3, 'success', $4, $5, $6, CURRENT_TIMESTAMP)`,
+  //       [
+  //         payment.user_id,
+  //         payment.amount,
+  //         payment.amount,
+  //         voterDescription,
+  //         electionId,
+  //         JSON.stringify({
+  //           amountPaid: payment.amount,
+  //           gateway: payment.gateway_used,
+  //           paymentId: payment.id,
+  //           electionId: electionId,
+  //           electionTitle: election.title
+  //         })
+  //       ]
+  //     );
+
+  //     console.log('✅ Voter transaction recorded');
+
+  //     await client.query('COMMIT');
+
+  //     console.log('✅ Payment confirmed successfully!\n');
+
+  //     return { 
+  //       success: true, 
+  //       payment, 
+  //       breakdown: {
+  //         voterPaid: payment.amount,
+  //         gatewayFee,
+  //         platformFee,
+  //         creatorReceives: netAmount,
+  //         lockedUntil
+  //       }
+  //     };
+  //   } catch (error) {
+  //     await client.query('ROLLBACK');
+  //     console.error('❌ Confirm payment error:', error);
+  //     throw error;
+  //   } finally {
+  //     client.release();
+  //   }
+  // }
+
+
+
+
+
 
   // ✅ FIXED: Default platform fee is 5%
   async getUserProcessingFee(userId) {
