@@ -62,6 +62,12 @@ router.get(
   votingController.getVotingHistory
 );
 
+router.get(
+  '/elections/:electionId/audit-logs',
+  roleCheck(['admin', 'election_creator']),
+  votingController.getVoteAuditLogs
+);
+
 export default router;
 // import express from 'express';
 // import votingController from '../controllers/voting.controller.js';
