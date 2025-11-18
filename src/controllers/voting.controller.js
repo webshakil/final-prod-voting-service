@@ -1470,43 +1470,145 @@ export const getVotingHistory = async (req, res) => {
 // ========================================
 // GET AUDIT LOGS (Admin only)
 // ========================================
+// src/controllers/voting.controller.js
+
+// src/controllers/voting.controller.js
+
 export const getVoteAuditLogs = async (req, res) => {
   try {
     const { electionId } = req.params;
-    const { flaggedOnly = true } = req.query;
+    const { page = 1, limit = 50 } = req.query;
+    const offset = (page - 1) * limit;
 
     console.log(`📋 Retrieving audit logs for election ${electionId}`);
 
-    let query = `
-      SELECT 
-        a.*,
-        e.title as election_title,
-        u.email as user_email
-      FROM votteryy_vote_audit a
-      LEFT JOIN votteryyy_elections e ON a.election_id = e.id
-      LEFT JOIN votteryy_users u ON a.user_id::integer = u.id
-      WHERE a.election_id = $1
-    `;
+    // ✅ CORRECTED SQL QUERY - Using real table names
+    let query;
+    let queryParams;
 
-    if (flaggedOnly === 'true') {
-      query += ` AND a.flagged_for_review = TRUE`;
+    if (electionId === 'all') {
+      // Get audit logs for all elections
+      query = `
+        SELECT 
+          a.id,
+          a.user_id,
+          a.election_id,
+          a.attempt_type,
+          a.ip_address,
+          a.user_agent,
+          a.attempted_at,
+          a.flagged_for_review,
+          a.reviewed_at,
+          a.notes,
+          e.title as election_title,
+          ud.first_name,
+          ud.last_name,
+          CONCAT(ud.first_name, ' ', ud.last_name) as user_name
+        FROM votteryy_audit_logs a
+        LEFT JOIN votteryyy_elections e ON a.election_id = e.id
+        LEFT JOIN votteryy_user_details ud ON a.user_id = ud.user_id
+        ORDER BY a.attempted_at DESC
+        LIMIT $1 OFFSET $2
+      `;
+      queryParams = [limit, offset];
+    } else {
+      // Get audit logs for specific election
+      query = `
+        SELECT 
+          a.id,
+          a.user_id,
+          a.election_id,
+          a.attempt_type,
+          a.ip_address,
+          a.user_agent,
+          a.attempted_at,
+          a.flagged_for_review,
+          a.reviewed_at,
+          a.notes,
+          e.title as election_title,
+          ud.first_name,
+          ud.last_name,
+          CONCAT(ud.first_name, ' ', ud.last_name) as user_name
+        FROM votteryy_audit_logs a
+        LEFT JOIN votteryyy_elections e ON a.election_id = e.id
+        LEFT JOIN votteryy_user_details ud ON a.user_id = ud.user_id
+        WHERE a.election_id = $1
+        ORDER BY a.attempted_at DESC
+        LIMIT $2 OFFSET $3
+      `;
+      queryParams = [electionId, limit, offset];
     }
 
-    query += ` ORDER BY a.attempted_at DESC`;
+    const result = await pool.query(query, queryParams);
 
-    const result = await pool.query(query, [electionId]);
+    // Get total count
+    const countQuery = electionId === 'all'
+      ? 'SELECT COUNT(*) FROM votteryy_audit_logs'
+      : 'SELECT COUNT(*) FROM votteryy_audit_logs WHERE election_id = $1';
+    
+    const countParams = electionId === 'all' ? [] : [electionId];
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].count);
+
+    console.log(`✅ Found ${result.rows.length} audit logs`);
 
     res.json({
       success: true,
-      auditLogs: result.rows,
-      count: result.rows.length
+      data: result.rows,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / limit),
+      },
     });
 
   } catch (error) {
     console.error('❌ Get audit logs error:', error);
-    res.status(500).json({ error: 'Failed to get audit logs' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to retrieve audit logs',
+      message: error.message 
+    });
   }
 };
+// export const getVoteAuditLogs = async (req, res) => {
+//   try {
+//     const { electionId } = req.params;
+//     const { flaggedOnly = true } = req.query;
+
+//     console.log(`📋 Retrieving audit logs for election ${electionId}`);
+
+//     let query = `
+//       SELECT 
+//         a.*,
+//         e.title as election_title,
+//         u.email as user_email
+//       FROM votteryy_vote_audit a
+//       LEFT JOIN votteryyy_elections e ON a.election_id = e.id
+//       LEFT JOIN votteryy_users u ON a.user_id::integer = u.id
+//       WHERE a.election_id = $1
+//     `;
+
+//     if (flaggedOnly === 'true') {
+//       query += ` AND a.flagged_for_review = TRUE`;
+//     }
+
+//     query += ` ORDER BY a.attempted_at DESC`;
+
+//     const result = await pool.query(query, [electionId]);
+
+//     res.json({
+//       success: true,
+//       auditLogs: result.rows,
+//       count: result.rows.length
+//     });
+
+//   } catch (error) {
+//     console.error('❌ Get audit logs error:', error);
+//     res.status(500).json({ error: 'Failed to get audit logs' });
+//   }
+// };
 
 export default {
   getBallot,
