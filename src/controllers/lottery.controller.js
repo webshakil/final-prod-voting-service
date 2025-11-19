@@ -390,56 +390,7 @@ async getLotteryParticipants(req, res) {
     res.status(500).json({ error: 'Failed to retrieve lottery participants' });
   }
 }
-  // async getLotteryParticipants(req, res) {
-  //   try {
-  //     const { electionId } = req.params;
 
-  //     // ✅ FIX: Use votteryyy_lottery_tickets (3 y's)
-  //     const result = await pool.query(
-  //       `SELECT 
-  //          lt.ticket_id,
-  //          lt.ticket_number,
-  //          lt.ball_number,
-  //          lt.user_id,
-  //          lt.created_at,
-  //          ud.full_name,
-  //          ud.username,
-  //          ud.email
-  //        FROM votteryy_lottery_tickets lt
-  //        LEFT JOIN votteryy_user_details ud ON lt.user_id = ud.user_id
-  //        WHERE lt.election_id = $1
-  //        ORDER BY lt.created_at ASC`,
-  //       [electionId]
-  //     );
-
-  //     const participants = result.rows.map(p => ({
-  //       id: p.ticket_id,
-  //       ticket_id: p.ticket_id,
-  //       ticket_number: p.ticket_number,
-  //       ticketNumber: p.ticket_number,
-  //       ball_number: p.ball_number,
-  //       ballNumber: p.ball_number,
-  //       user_id: p.user_id,
-  //       userId: p.user_id,
-  //       full_name: p.full_name,
-  //       fullName: p.full_name,
-  //       username: p.username,
-  //       email: p.email,
-  //       created_at: p.created_at,
-  //       createdAt: p.created_at,
-  //     }));
-
-  //     res.json({
-  //       participants,
-  //       count: participants.length,
-  //       totalCount: participants.length,
-  //     });
-
-  //   } catch (error) {
-  //     console.error('Get lottery participants error:', error);
-  //     res.status(500).json({ error: 'Failed to retrieve lottery participants' });
-  //   }
-  // }
 
   // Draw lottery (manual trigger - admin only)
   async drawLottery(req, res) {
@@ -452,7 +403,7 @@ async getLotteryParticipants(req, res) {
 
       // Verify admin role
       if (!req.user.roles.includes('admin') && !req.user.roles.includes('manager')) {
-        return res.status(403).json({ error: 'Admin access required shakil' });
+        return res.status(403).json({ error: 'Admin access required ' });
       }
 
       // Get election

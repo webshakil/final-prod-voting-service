@@ -152,7 +152,36 @@ router.post(
   roleCheck(['admin', 'manager']),
   walletController.refundFailedElection
 );
+// ==========================================
+// LOTTERY DEPOSIT ROUTES
+// ==========================================
 
+// Create checkout session for lottery deposit
+router.post(
+  '/lottery-deposit/:electionId/checkout',
+  roleCheck(['Individual Election Creator (Free)', 'Organization Admin', 'voter']),
+  walletController.createLotteryDepositCheckout
+);
+
+// Confirm deposit after Stripe payment
+router.post(
+  '/lottery-deposit/confirm',
+  walletController.confirmLotteryDeposit
+);
+
+// Get deposit status for an election
+router.get(
+  '/lottery-deposit/:electionId/status',
+  roleCheck(['Individual Election Creator (Free)', 'Organization Admin', 'voter']),
+  walletController.getLotteryDepositStatus
+);
+
+// In wallet.routes.js
+router.get(
+  '/creator/escrow-deposits',
+  roleCheck(['Individual Election Creator (Free)', 'Organization Admin', 'voter']),
+  walletController.getCreatorEscrowDeposits
+);
 export default router;
 // import express from 'express';
 // import walletController from '../controllers/wallet.controller.js';

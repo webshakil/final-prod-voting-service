@@ -3,6 +3,7 @@ import paymentService from '../services/payment.service.js';
 import auditService from '../services/audit.service.js';
 import notificationService from '../services/notification.service.js';
 import { depositSchema, withdrawalSchema } from '../utils/validators.js';
+import Stripe from 'stripe';
 
 class WalletController {
 
@@ -700,7 +701,8 @@ async confirmElectionPayment(req, res) {
     const sig = req.headers['stripe-signature'];
     if (sig && process.env.STRIPE_WEBHOOK_SECRET) {
       try {
-        const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        // const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
         const event = stripe.webhooks.constructEvent(
           req.rawBody,  // Need raw body for webhooks
           sig, 
@@ -975,6 +977,313 @@ async confirmElectionPayment(req, res) {
       res.status(500).json({ error: 'Failed to refund election' });
     }
   }
+
+  // ==========================================
+// LOTTERY DEPOSIT METHODS
+// ==========================================
+
+/**
+ * Create Stripe checkout for lottery prize deposit
+ */
+async createLotteryDepositCheckout(req, res) {
+  try {
+    const userId = req.user.userId;
+    const { electionId } = req.params;
+    const { amount } = req.body;
+
+    console.log('💰 Creating lottery deposit checkout:', { electionId, userId, amount });
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: 'Invalid deposit amount' });
+    }
+
+    // Validate election ownership
+    const electionResult = await pool.query(
+      `SELECT id, title, lottery_enabled, lottery_prize_funding_source,
+              lottery_total_prize_pool, lottery_estimated_value
+       FROM votteryyy_elections 
+       WHERE id = $1 AND creator_id = $2`,
+      [electionId, userId]
+    );
+
+    if (electionResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Election not found or unauthorized' });
+    }
+
+    const election = electionResult.rows[0];
+
+    if (!election.lottery_enabled) {
+      return res.status(400).json({ error: 'Lottery is not enabled for this election' });
+    }
+
+    if (election.lottery_prize_funding_source !== 'creator_funded') {
+      return res.status(400).json({ error: 'This election does not require creator deposit' });
+    }
+
+    // Check if already deposited
+    const existingDeposit = await pool.query(
+      `SELECT status FROM votteryy_lottery_escrow 
+       WHERE election_id = $1 AND creator_id = $2`,
+      [electionId, userId]
+    );
+
+    if (existingDeposit.rows.length > 0 && existingDeposit.rows[0].status === 'completed') {
+      return res.status(400).json({ 
+        error: 'Deposit already completed',
+        status: 'completed'
+      });
+    }
+
+    // ✅ FIXED: Use Stripe with ES Modules
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+    
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `Lottery Prize Pool Deposit`,
+            description: `Prize pool deposit for: ${election.title}`,
+          },
+          unit_amount: Math.round(amount * 100), // Convert to cents
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: `${process.env.FRONTEND_URL}/dashboard/creator-wallet?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/dashboard/creator-wallet`,
+      metadata: {
+        election_id: electionId.toString(),
+        creator_id: userId.toString(),
+        deposit_type: 'lottery_prize',
+      },
+    });
+
+    // Store/update escrow record
+    await pool.query(
+      `INSERT INTO votteryy_lottery_escrow 
+       (election_id, creator_id, amount, stripe_session_id, status)
+       VALUES ($1, $2, $3, $4, 'pending')
+       ON CONFLICT (election_id) 
+       DO UPDATE SET 
+         stripe_session_id = $4, 
+         status = 'pending',
+         created_at = CURRENT_TIMESTAMP`,
+      [electionId, userId, amount, session.id]
+    );
+
+    console.log('✅ Checkout session created:', session.id);
+
+    res.json({
+      success: true,
+      sessionId: session.id,
+      checkoutUrl: session.url,
+    });
+
+  } catch (error) {
+    console.error('❌ Create lottery deposit checkout error:', error);
+    res.status(500).json({ 
+      error: 'Failed to create checkout session',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}
+
+/**
+ * Confirm lottery deposit after Stripe payment
+ */
+
+/**
+ * Confirm lottery deposit after Stripe payment
+ */
+async confirmLotteryDeposit(req, res) {
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+
+    const { sessionId } = req.body;
+
+    console.log('🔔 Confirming lottery deposit, session:', sessionId);
+
+    if (!sessionId) {
+      return res.status(400).json({ error: 'Session ID required' });
+    }
+
+    // ✅ FIXED: Use Stripe with ES Modules
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    console.log('Stripe session status:', session.payment_status);
+
+    if (session.payment_status !== 'paid') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        error: 'Payment not completed',
+        paymentStatus: session.payment_status
+      });
+    }
+
+    const electionId = parseInt(session.metadata.election_id);
+    const creatorId = parseInt(session.metadata.creator_id);
+
+    // Update escrow record
+    const updateResult = await client.query(
+      `UPDATE votteryy_lottery_escrow
+       SET 
+         status = 'completed',
+         stripe_payment_intent_id = $1,
+         completed_at = CURRENT_TIMESTAMP
+       WHERE stripe_session_id = $2
+       RETURNING *`,
+      [session.payment_intent, sessionId]
+    );
+
+    if (updateResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Escrow record not found' });
+    }
+
+    const deposit = updateResult.rows[0];
+
+    await client.query('COMMIT');
+
+    console.log('✅ Lottery deposit confirmed:', {
+      electionId,
+      creatorId,
+      amount: deposit.amount,
+      completedAt: deposit.completed_at
+    });
+
+    res.json({ 
+      success: true, 
+      electionId,
+      deposit: {
+        amount: deposit.amount,
+        status: deposit.status,
+        completedAt: deposit.completed_at
+      },
+      message: 'Deposit confirmed! You can now publish your election.'
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Confirm lottery deposit error:', error);
+    res.status(500).json({ 
+      error: 'Failed to confirm deposit',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Get lottery deposit status for an election
+ */
+async getLotteryDepositStatus(req, res) {
+  try {
+    const userId = req.user.userId;
+    const { electionId } = req.params;
+
+    console.log('🔍 Getting lottery deposit status:', { electionId, userId });
+
+    const result = await pool.query(
+      `SELECT 
+         e.id,
+         e.lottery_enabled,
+         e.lottery_prize_funding_source,
+         e.lottery_total_prize_pool,
+         es.status as deposit_status,
+         es.amount as deposited_amount,
+         es.completed_at,
+         es.stripe_session_id
+       FROM votteryyy_elections e
+       LEFT JOIN votteryy_lottery_escrow es ON e.id = es.election_id AND es.creator_id = $2
+       WHERE e.id = $1 AND e.creator_id = $2`,
+      [electionId, userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Election not found or unauthorized' });
+    }
+
+    const row = result.rows[0];
+    const requiresDeposit = row.lottery_enabled && row.lottery_prize_funding_source === 'creator_funded';
+    const depositCompleted = row.deposit_status === 'completed';
+
+    res.json({
+      success: true,
+      requiresDeposit: requiresDeposit,
+      depositCompleted: depositCompleted,
+      depositStatus: row.deposit_status || 'not_started',
+      requiredAmount: parseFloat(row.lottery_total_prize_pool || 0),
+      depositedAmount: parseFloat(row.deposited_amount || 0),
+      completedAt: row.completed_at,
+      canPublish: !requiresDeposit || depositCompleted
+    });
+
+  } catch (error) {
+    console.error('❌ Get lottery deposit status error:', error);
+    res.status(500).json({ 
+      error: 'Failed to get deposit status',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}
+
+// Get creator's escrow deposits summary
+async getCreatorEscrowDeposits(req, res) {
+  try {
+    const userId = req.user.userId;
+
+    console.log('📊 Getting escrow deposits for creator:', userId);
+
+    const result = await pool.query(
+      `SELECT 
+         le.*,
+         e.title as election_title,
+         e.status as election_status,
+         e.end_date,
+         e.end_time
+       FROM votteryy_lottery_escrow le
+       JOIN votteryyy_elections e ON le.election_id = e.id
+       WHERE le.creator_id = $1
+       ORDER BY le.created_at DESC`,
+      [userId]
+    );
+
+    const deposits = result.rows.map(row => ({
+      electionId: row.election_id,
+      electionTitle: row.election_title,
+      electionStatus: row.election_status,
+      amount: parseFloat(row.amount),
+      status: row.status,
+      completedAt: row.completed_at,
+      endDate: row.end_date,
+      endTime: row.end_time,
+    }));
+
+    const totalEscrowed = deposits
+      .filter(d => d.status === 'completed')
+      .reduce((sum, d) => sum + d.amount, 0);
+
+    res.json({
+      success: true,
+      deposits,
+      totalEscrowed,
+      depositCount: deposits.length,
+    });
+
+  } catch (error) {
+    console.error('❌ Get escrow deposits error:', error);
+    res.status(500).json({ 
+      error: 'Failed to get escrow deposits',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+}
 }
 
 export default new WalletController();
