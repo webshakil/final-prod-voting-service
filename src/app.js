@@ -5,8 +5,8 @@ import helmet from 'helmet';
 import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import cron from 'node-cron';
-import { initializeSocket } from './socket/votingSocket.js';
-import { initializeNotificationSocket } from './socket/notificationSocket.js';  // ✅ ADDED
+// ✅ FIXED: Use single combined socket instead of two separate ones
+import { initializeCombinedSocket } from './socket/combinedSocket.js';
 
 // Import routes
 import votingRoutes from './routes/voting.routes.js';
@@ -32,9 +32,8 @@ const app = express();
 // ✅ CREATE HTTP SERVER (REQUIRED FOR SOCKET.IO)
 const server = http.createServer(app);
 
-// ✅ INITIALIZE BOTH SOCKET.IO SERVERS
-initializeSocket(server);  // For live results
-initializeNotificationSocket(server);  // For notifications ✅ ADDED
+// ✅ FIXED: Initialize SINGLE combined socket
+initializeCombinedSocket(server);
 
 const PORT = process.env.PORT || 5003;
 

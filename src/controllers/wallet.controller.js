@@ -10,7 +10,12 @@ import {
   emitPaymentInitiated,
   emitPaymentSuccess,
   emitPaymentFailed
-} from '../socket/notificationSocket.js';
+} from '../socket/combinedSocket.js';
+// import { 
+//   emitPaymentInitiated,
+//   emitPaymentSuccess,
+//   emitPaymentFailed
+// } from '../socket/notificationSocket.js';
 
 class WalletController {
 

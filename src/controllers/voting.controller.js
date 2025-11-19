@@ -10,12 +10,12 @@ import {
 import AuditService from '../services/audit.service.js';
 import NotificationService from '../services/notification.service.js';
 
-// ✅ NEW IMPORT - ADDED FOR NOTIFICATIONS
+// ✅ FIXED: Import from combined socket
 import { 
   emitVoteCastConfirmation,
   emitVoteUpdated,
   emitLotteryTicketCreated
-} from '../socket/notificationSocket.js';
+} from '../socket/combinedSocket.js';
 
 // ========================================
 // GET BALLOT
