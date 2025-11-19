@@ -1336,6 +1336,18 @@ async confirmLotteryDeposit(req, res) {
     }
 
     const deposit = updateResult.rows[0];
+    // ✅✅✅ ADD THESE 7 LINES ✅✅✅
+console.log('📢 Updating election status to published for election:', electionId);
+
+await client.query(
+  `UPDATE votteryyy_elections
+   SET status = 'published', published_at = CURRENT_TIMESTAMP
+   WHERE id = $1 AND creator_id = $2`,
+  [electionId, creatorId]
+);
+
+console.log('✅ Election status updated to PUBLISHED');
+// ✅✅✅ END - 7 LINES ADDED ✅✅✅
 
     await client.query('COMMIT');
 
