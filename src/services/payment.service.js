@@ -766,65 +766,127 @@ const voterDescription = `Paid $${amount.toFixed(2)} to participate in "${electi
       client.release();
     }
   }
+async releaseBlockedAccounts(electionId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  async releaseBlockedAccounts(electionId) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+    console.log('🔓 Releasing blocked accounts for election:', electionId);
 
-      console.log('🔓 Releasing blocked accounts for election:', electionId);
+    const blockedResult = await client.query(
+      `SELECT * FROM votteryy_blocked_accounts
+       WHERE election_id = $1 AND status = 'locked'`,
+      [electionId]
+    );
 
-      const blockedResult = await client.query(
-        `SELECT * FROM votteryy_blocked_accounts
-         WHERE election_id = $1 AND status = 'locked'`,
-        [electionId]
+    console.log(`📊 Found ${blockedResult.rows.length} blocked accounts to release`);
+
+    for (const blocked of blockedResult.rows) {
+      // ✅ FIX: Convert PostgreSQL numeric to JavaScript number
+      const amount = parseFloat(blocked.amount);
+      const platformFee = parseFloat(blocked.platform_fee) || 0;
+      const stripeFee = parseFloat(blocked.stripe_fee) || 0;
+
+      await client.query(
+        `UPDATE votteryy_wallets
+         SET balance = balance + $1,
+             blocked_balance = blocked_balance - $1
+         WHERE user_id = $2`,
+        [amount, blocked.user_id]
       );
 
-      console.log(`📊 Found ${blockedResult.rows.length} blocked accounts to release`);
+      await client.query(
+        `UPDATE votteryy_blocked_accounts
+         SET status = 'released', released_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [blocked.id]
+      );
 
-      for (const blocked of blockedResult.rows) {
-        await client.query(
-          `UPDATE votteryy_wallets
-           SET balance = balance + $1,
-               blocked_balance = blocked_balance - $1
-           WHERE user_id = $2`,
-          [blocked.amount, blocked.user_id]
-        );
+      await client.query(
+        `INSERT INTO votteryy_transactions
+         (user_id, transaction_type, amount, election_id, status, description)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          blocked.user_id, 
+          'election_funds_released', 
+          amount, // ✅ Use the parsed number
+          electionId, 
+          'success', 
+          `Election #${electionId} ended - $${amount.toFixed(2)} released and available for withdrawal` // ✅ Now .toFixed() works
+        ]
+      );
 
-        await client.query(
-          `UPDATE votteryy_blocked_accounts
-           SET status = 'released', released_at = CURRENT_TIMESTAMP
-           WHERE id = $1`,
-          [blocked.id]
-        );
-
-        await client.query(
-          `INSERT INTO votteryy_transactions
-           (user_id, transaction_type, amount, election_id, status, description)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [
-            blocked.user_id, 
-            'election_funds_released', 
-            blocked.amount, 
-            electionId, 
-            'success', 
-            `Election #${electionId} ended - $${blocked.amount.toFixed(2)} released and available for withdrawal`
-          ]
-        );
-
-        console.log(`✅ Released $${blocked.amount} for user ${blocked.user_id}`);
-      }
-
-      await client.query('COMMIT');
-
-      return { success: true, releasedCount: blockedResult.rows.length };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+      console.log(`✅ Released $${amount.toFixed(2)} for user ${blocked.user_id}`);
     }
+
+    await client.query('COMMIT');
+
+    return { success: true, releasedCount: blockedResult.rows.length };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
+}
+  // async releaseBlockedAccounts(electionId) {
+  //   const client = await pool.connect();
+  //   try {
+  //     await client.query('BEGIN');
+
+  //     console.log('🔓 Releasing blocked accounts for election:', electionId);
+
+  //     const blockedResult = await client.query(
+  //       `SELECT * FROM votteryy_blocked_accounts
+  //        WHERE election_id = $1 AND status = 'locked'`,
+  //       [electionId]
+  //     );
+
+  //     console.log(`📊 Found ${blockedResult.rows.length} blocked accounts to release`);
+
+  //     for (const blocked of blockedResult.rows) {
+  //       await client.query(
+  //         `UPDATE votteryy_wallets
+  //          SET balance = balance + $1,
+  //              blocked_balance = blocked_balance - $1
+  //          WHERE user_id = $2`,
+  //         [blocked.amount, blocked.user_id]
+  //       );
+
+  //       await client.query(
+  //         `UPDATE votteryy_blocked_accounts
+  //          SET status = 'released', released_at = CURRENT_TIMESTAMP
+  //          WHERE id = $1`,
+  //         [blocked.id]
+  //       );
+
+  //       await client.query(
+  //         `INSERT INTO votteryy_transactions
+  //          (user_id, transaction_type, amount, election_id, status, description)
+  //          VALUES ($1, $2, $3, $4, $5, $6)`,
+  //         [
+  //           blocked.user_id, 
+  //           'election_funds_released', 
+  //           blocked.amount, 
+  //           electionId, 
+  //           'success', 
+  //           `Election #${electionId} ended - $${blocked.amount.toFixed(2)} released and available for withdrawal`
+  //         ]
+  //       );
+
+  //       console.log(`✅ Released $${blocked.amount} for user ${blocked.user_id}`);
+  //     }
+
+  //     await client.query('COMMIT');
+
+  //     return { success: true, releasedCount: blockedResult.rows.length };
+  //   } catch (error) {
+  //     await client.query('ROLLBACK');
+  //     throw error;
+  //   } finally {
+  //     client.release();
+  //   }
+  // }
 }
 
 export default new PaymentService();

@@ -487,131 +487,287 @@ class VerificationController {
    * Verify anonymous vote using vote token
    * No authentication required - anyone with token can verify
    */
-  async verifyAnonymousVote(req, res) {
+
+async verifyAnonymousVote(req, res) {
+  try {
+    const { receiptId, voteToken, verificationCode } = req.body;
+
+    console.log('🔍 Verifying anonymous vote with 3-factor authentication');
+
+    // Validate all three fields are provided
+    if (!receiptId || !voteToken || !verificationCode) {
+      return res.status(400).json({ 
+        success: false,
+        verified: false,
+        error: 'All three fields are required',
+        message: 'Please provide Receipt ID, Vote Token, and Verification Code'
+      });
+    }
+
+    // ✅ REMOVED: Token format validation - let database handle it
+    // The old code had: if (typeof voteToken !== 'string' || voteToken.length !== 64)
+    // This was too strict!
+
+    // Query with all three credentials for maximum security
+    const result = await pool.query(
+      `SELECT 
+        av.id,
+        av.voting_id,
+        av.election_id,
+        av.vote_hash,
+        av.receipt_id,
+        av.verification_code,
+        av.vote_token,
+        av.voted_at,
+        e.id as election_id,
+        e.title as election_title,
+        e.status as election_status,
+        e.start_date,
+        e.end_date,
+        e.voting_type
+       FROM votteryyy_anonymous_votes av
+       JOIN votteryyy_elections e ON av.election_id = e.id
+       WHERE av.receipt_id = $1 
+       AND av.vote_token = $2 
+       AND av.verification_code = $3`,
+      [receiptId, voteToken, verificationCode]
+    );
+
+    if (result.rows.length === 0) {
+      console.log('❌ Vote not found or credentials mismatch');
+      return res.status(404).json({ 
+        success: false,
+        verified: false,
+        error: 'Vote not found',
+        message: 'Vote not found or credentials do not match. Please verify all three fields are correct.'
+      });
+    }
+
+    const vote = result.rows[0];
+
+    console.log('✅ Anonymous vote verified with 3-factor auth:', vote.voting_id);
+
+    // Get vote count for this election
+    const voteCountResult = await pool.query(
+      `SELECT COUNT(*) as total_votes 
+       FROM votteryyy_anonymous_votes 
+       WHERE election_id = $1`,
+      [vote.election_id]
+    );
+
+    const totalVotes = parseInt(voteCountResult.rows[0].total_votes);
+
+    // Check if vote exists on public bulletin board
+    let onBulletinBoard = false;
+    let blockHash = null;
+    
     try {
-      const { voteToken } = req.body;
-
-      console.log('🔍 Verifying anonymous vote with token:', voteToken?.substring(0, 16) + '...');
-
-      // Validate input
-      if (!voteToken || typeof voteToken !== 'string' || voteToken.length !== 64) {
-        console.log('❌ Invalid token format');
-        return res.status(400).json({ 
-          verified: false,
-          error: 'Invalid vote token format. Token must be a 64-character hexadecimal string.' 
-        });
-      }
-
-      // Query anonymous votes table
-      const result = await pool.query(
-        `SELECT 
-          av.id,
-          av.voting_id,
-          av.election_id,
-          av.vote_hash,
-          av.receipt_id,
-          av.verification_code,
-          av.voted_at,
-          e.id as election_id,
-          e.title as election_title,
-          e.status as election_status,
-          e.start_date,
-          e.end_date,
-          e.voting_type
-         FROM votteryyy_anonymous_votes av
-         JOIN votteryyy_elections e ON av.election_id = e.id
-         WHERE av.vote_token = $1`,
-        [voteToken]
-      );
-
-      if (result.rows.length === 0) {
-        console.log('❌ Vote token not found');
-        return res.status(404).json({ 
-          verified: false,
-          error: 'Vote not found. Invalid token or vote does not exist.',
-          message: 'Please check your vote token and try again.'
-        });
-      }
-
-      const vote = result.rows[0];
-
-      console.log('✅ Anonymous vote verified:', vote.voting_id);
-
-      // Get vote count for this election (for transparency)
-      const voteCountResult = await pool.query(
-        `SELECT COUNT(*) as total_votes 
-         FROM votteryyy_anonymous_votes 
-         WHERE election_id = $1`,
-        [vote.election_id]
-      );
-
-      const totalVotes = parseInt(voteCountResult.rows[0].total_votes);
-
-      // Check if vote exists on public bulletin board
       const bulletinResult = await pool.query(
         `SELECT * FROM votteryy_public_bulletin_board WHERE vote_hash = $1`,
         [vote.vote_hash]
       );
-
-      const onBulletinBoard = bulletinResult.rows.length > 0;
-
-      // Record verification attempt in audit log (optional)
-      try {
-        await pool.query(
-          `INSERT INTO votteryy_vote_verifications 
-           (voting_id, verification_method, verified_at, ip_address, user_agent)
-           VALUES ($1, 'anonymous_token', NOW(), $2, $3)`,
-          [
-            vote.voting_id, 
-            req.ip || req.connection?.remoteAddress || 'unknown',
-            req.headers['user-agent'] || 'unknown'
-          ]
-        );
-        console.log('📝 Verification logged');
-      } catch (auditError) {
-        console.warn('⚠️ Could not log verification attempt:', auditError.message);
-        // Don't fail verification if audit logging fails
+      onBulletinBoard = bulletinResult.rows.length > 0;
+      if (onBulletinBoard) {
+        blockHash = bulletinResult.rows[0].block_hash;
       }
-
-      // Return verification result
-      res.json({
-        verified: true,
-        anonymous: true,
-        message: 'Your anonymous vote has been successfully verified!',
-        vote: {
-          votingId: vote.voting_id,
-          voteHash: vote.vote_hash,
-          receiptId: vote.receipt_id,
-          verificationCode: vote.verification_code,
-          votedAt: vote.voted_at
-        },
-        election: {
-          id: vote.election_id,
-          title: vote.election_title,
-          status: vote.election_status,
-          votingType: vote.voting_type,
-          startDate: vote.start_date,
-          endDate: vote.end_date,
-          totalVotes: totalVotes
-        },
-        onPublicBulletinBoard: onBulletinBoard,
-        blockHash: onBulletinBoard ? bulletinResult.rows[0].block_hash : null,
-        verificationDetails: {
-          method: 'anonymous_token',
-          verifiedAt: new Date().toISOString(),
-          note: 'This verification confirms your vote was recorded without revealing your identity.'
-        }
-      });
-
-    } catch (error) {
-      console.error('❌ Verify anonymous vote error:', error);
-      res.status(500).json({ 
-        verified: false,
-        error: 'Failed to verify vote',
-        details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
-      });
+    } catch (bulletinError) {
+      console.warn('⚠️ Could not check bulletin board:', bulletinError.message);
     }
+
+    // Record verification attempt in audit log
+    try {
+      await pool.query(
+        `INSERT INTO votteryy_vote_verifications 
+         (voting_id, verification_method, verified_at, ip_address, user_agent)
+         VALUES ($1, 'anonymous_3factor', NOW(), $2, $3)`,
+        [
+          vote.voting_id, 
+          req.ip || req.connection?.remoteAddress || 'unknown',
+          req.headers['user-agent'] || 'unknown'
+        ]
+      );
+      console.log('📝 Verification logged');
+    } catch (auditError) {
+      console.warn('⚠️ Could not log verification attempt:', auditError.message);
+    }
+
+    // Return verification result
+    res.json({
+      success: true,
+      verified: true,
+      anonymous: true,
+      message: 'Your anonymous vote has been successfully verified with 3-factor authentication!',
+      verification: {
+        receiptId: vote.receipt_id,
+        votingId: vote.voting_id,
+        voteHash: vote.vote_hash,
+        verificationCode: vote.verification_code,
+        electionTitle: vote.election_title,
+        electionStatus: vote.election_status,
+        timestamp: vote.voted_at,
+        isAnonymous: true,
+        verified: true
+      },
+      vote: {
+        votingId: vote.voting_id,
+        voteHash: vote.vote_hash,
+        receiptId: vote.receipt_id,
+        verificationCode: vote.verification_code,
+        votedAt: vote.voted_at
+      },
+      election: {
+        id: vote.election_id,
+        title: vote.election_title,
+        status: vote.election_status,
+        votingType: vote.voting_type,
+        startDate: vote.start_date,
+        endDate: vote.end_date,
+        totalVotes: totalVotes
+      },
+      onPublicBulletinBoard: onBulletinBoard,
+      blockHash: blockHash,
+      verificationDetails: {
+        method: 'anonymous_3factor',
+        verifiedAt: new Date().toISOString(),
+        note: 'This verification confirms your vote was recorded without revealing your identity. 3-factor authentication provides maximum security.'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Verify anonymous vote error:', error);
+    res.status(500).json({ 
+      success: false,
+      verified: false,
+      error: 'Failed to verify vote',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+    });
   }
+}
+  // async verifyAnonymousVote(req, res) {
+  //   try {
+  //     const { voteToken } = req.body;
+
+  //     console.log('🔍 Verifying anonymous vote with token:', voteToken?.substring(0, 16) + '...');
+
+  //     // Validate input
+  //     if (!voteToken || typeof voteToken !== 'string' || voteToken.length !== 64) {
+  //       console.log('❌ Invalid token format');
+  //       return res.status(400).json({ 
+  //         verified: false,
+  //         error: 'Invalid vote token format. Token must be a 64-character hexadecimal string.' 
+  //       });
+  //     }
+
+  //     // Query anonymous votes table
+  //     const result = await pool.query(
+  //       `SELECT 
+  //         av.id,
+  //         av.voting_id,
+  //         av.election_id,
+  //         av.vote_hash,
+  //         av.receipt_id,
+  //         av.verification_code,
+  //         av.voted_at,
+  //         e.id as election_id,
+  //         e.title as election_title,
+  //         e.status as election_status,
+  //         e.start_date,
+  //         e.end_date,
+  //         e.voting_type
+  //        FROM votteryyy_anonymous_votes av
+  //        JOIN votteryyy_elections e ON av.election_id = e.id
+  //        WHERE av.vote_token = $1`,
+  //       [voteToken]
+  //     );
+
+  //     if (result.rows.length === 0) {
+  //       console.log('❌ Vote token not found');
+  //       return res.status(404).json({ 
+  //         verified: false,
+  //         error: 'Vote not found. Invalid token or vote does not exist.',
+  //         message: 'Please check your vote token and try again.'
+  //       });
+  //     }
+
+  //     const vote = result.rows[0];
+
+  //     console.log('✅ Anonymous vote verified:', vote.voting_id);
+
+  //     // Get vote count for this election (for transparency)
+  //     const voteCountResult = await pool.query(
+  //       `SELECT COUNT(*) as total_votes 
+  //        FROM votteryyy_anonymous_votes 
+  //        WHERE election_id = $1`,
+  //       [vote.election_id]
+  //     );
+
+  //     const totalVotes = parseInt(voteCountResult.rows[0].total_votes);
+
+  //     // Check if vote exists on public bulletin board
+  //     const bulletinResult = await pool.query(
+  //       `SELECT * FROM votteryy_public_bulletin_board WHERE vote_hash = $1`,
+  //       [vote.vote_hash]
+  //     );
+
+  //     const onBulletinBoard = bulletinResult.rows.length > 0;
+
+  //     // Record verification attempt in audit log (optional)
+  //     try {
+  //       await pool.query(
+  //         `INSERT INTO votteryy_vote_verifications 
+  //          (voting_id, verification_method, verified_at, ip_address, user_agent)
+  //          VALUES ($1, 'anonymous_token', NOW(), $2, $3)`,
+  //         [
+  //           vote.voting_id, 
+  //           req.ip || req.connection?.remoteAddress || 'unknown',
+  //           req.headers['user-agent'] || 'unknown'
+  //         ]
+  //       );
+  //       console.log('📝 Verification logged');
+  //     } catch (auditError) {
+  //       console.warn('⚠️ Could not log verification attempt:', auditError.message);
+  //       // Don't fail verification if audit logging fails
+  //     }
+
+  //     // Return verification result
+  //     res.json({
+  //       verified: true,
+  //       anonymous: true,
+  //       message: 'Your anonymous vote has been successfully verified!',
+  //       vote: {
+  //         votingId: vote.voting_id,
+  //         voteHash: vote.vote_hash,
+  //         receiptId: vote.receipt_id,
+  //         verificationCode: vote.verification_code,
+  //         votedAt: vote.voted_at
+  //       },
+  //       election: {
+  //         id: vote.election_id,
+  //         title: vote.election_title,
+  //         status: vote.election_status,
+  //         votingType: vote.voting_type,
+  //         startDate: vote.start_date,
+  //         endDate: vote.end_date,
+  //         totalVotes: totalVotes
+  //       },
+  //       onPublicBulletinBoard: onBulletinBoard,
+  //       blockHash: onBulletinBoard ? bulletinResult.rows[0].block_hash : null,
+  //       verificationDetails: {
+  //         method: 'anonymous_token',
+  //         verifiedAt: new Date().toISOString(),
+  //         note: 'This verification confirms your vote was recorded without revealing your identity.'
+  //       }
+  //     });
+
+  //   } catch (error) {
+  //     console.error('❌ Verify anonymous vote error:', error);
+  //     res.status(500).json({ 
+  //       verified: false,
+  //       error: 'Failed to verify vote',
+  //       details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+  //     });
+  //   }
+  // }
 }
 
 export default new VerificationController();
