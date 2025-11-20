@@ -105,6 +105,38 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
+// Add to server.js BEFORE the app.use(errorHandler) line. for tepmporay draws
+// app.post('/api/test/trigger-lottery-draw', async (req, res) => {
+//   try {
+//     const result = await pool.query(
+//       `SELECT e.id 
+//        FROM votteryyy_elections e
+//        LEFT JOIN votteryy_lottery_draws ld ON e.id = ld.election_id
+//        WHERE e.lottery_enabled = true
+//        AND ld.id IS NULL
+//        AND e.lottery_draw_date < NOW()`
+//     );
+
+//     const results = [];
+//     for (const row of result.rows) {
+//       try {
+//         await lotteryController.autoDrawLottery(row.id);
+//         results.push({ electionId: row.id, status: 'success' });
+//       } catch (error) {
+//         results.push({ electionId: row.id, status: 'failed', error: error.message });
+//       }
+//     }
+
+//     res.json({ 
+//       message: 'Lottery draw test completed',
+//       processed: results.length,
+//       results 
+//     });
+//   } catch (error) {
+//     res.status(500).json({ error: error.message });
+//   }
+// });
+
 // Error handler
 app.use(errorHandler);
 
@@ -113,18 +145,20 @@ app.use(errorHandler);
 // ===========================
 
 // Auto-draw lotteries for completed elections (runs every hour)
+// Auto-draw lotteries for completed elections (runs every hour)
 if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
   cron.schedule('0 * * * *', async () => {
     console.log('🎰 Running auto-lottery draw cron job...');
     
     try {
       const result = await pool.query(
-        `SELECT e.id FROM votteryyy_elections e
+        `SELECT e.id 
+         FROM votteryyy_elections e
          LEFT JOIN votteryy_lottery_draws ld ON e.id = ld.election_id
          WHERE e.lottery_enabled = true
-         AND e.status = 'completed'
          AND ld.id IS NULL
-         AND (e.end_date + COALESCE(e.end_time, '23:59:59'::time))::timestamp < NOW()`
+         AND e.lottery_draw_date IS NOT NULL
+         AND e.lottery_draw_date < NOW()`
       );
 
       console.log(`Found ${result.rows.length} elections ready for lottery draw`);
@@ -143,6 +177,36 @@ if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
     }
   });
 }
+// if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
+//   cron.schedule('0 * * * *', async () => {
+//     console.log('🎰 Running auto-lottery draw cron job...');
+    
+//     try {
+//       const result = await pool.query(
+//         `SELECT e.id FROM votteryyy_elections e
+//          LEFT JOIN votteryy_lottery_draws ld ON e.id = ld.election_id
+//          WHERE e.lottery_enabled = true
+//          AND e.status = 'completed'
+//          AND ld.id IS NULL
+//          AND (e.end_date + COALESCE(e.end_time, '23:59:59'::time))::timestamp < NOW()`
+//       );
+
+//       console.log(`Found ${result.rows.length} elections ready for lottery draw`);
+
+//       for (const row of result.rows) {
+//         try {
+//           await lotteryController.autoDrawLottery(row.id);
+//           console.log(`✅ Auto-drew lottery for election ${row.id}`);
+//         } catch (error) {
+//           console.error(`❌ Failed to draw lottery for election ${row.id}:`, error.message);
+//         }
+//       }
+
+//     } catch (error) {
+//       console.error('Auto-lottery cron error:', error);
+//     }
+//   });
+// }
 
 // Release blocked accounts for completed elections (runs every hour)
 cron.schedule('0 * * * *', async () => {
