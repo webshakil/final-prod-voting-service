@@ -1445,6 +1445,13 @@ export const getUserVote = async (req, res) => {
 // ========================================
 // GET VOTING HISTORY
 // ========================================
+
+// ========================================
+// GET VOTING HISTORY - COVERS BOTH NORMAL & ANONYMOUS VOTES
+// ========================================
+// ========================================
+// GET VOTING HISTORY - COVERS BOTH NORMAL & ANONYMOUS VOTES
+// ========================================
 export const getVotingHistory = async (req, res) => {
   try {
     const userId = req.user?.userId || req.headers['x-user-id'];
@@ -1458,56 +1465,108 @@ export const getVotingHistory = async (req, res) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    // Get total count
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM votteryy_votes
-      WHERE user_id = $1 AND status = 'valid'
-    `;
-    const countResult = await pool.query(countQuery, [String(userId)]);
-    const total = parseInt(countResult.rows[0].total);
-
-    // Get votes with election details and lottery info
+    // ========================================
+    // COMBINED QUERY: Normal + Anonymous Votes
+    // ========================================
     const query = `
+      WITH combined_votes AS (
+        -- Normal votes
+        SELECT 
+          v.id,
+          v.voting_id,
+          v.election_id,
+          v.user_id,
+          v.receipt_id,
+          v.vote_hash,
+          v.status,
+          v.created_at,
+          v.updated_at,
+          v.anonymous,
+          v.is_edited,
+          e.title as election_title,
+          e.status as election_status,
+          e.is_free,
+          e.general_participation_fee,
+          e.lottery_enabled,
+          lt.ball_number,
+          lt.ticket_number as lottery_ticket_number,
+          lt.ticket_id,
+          FALSE as is_anonymous_vote
+        FROM votteryy_votes v
+        LEFT JOIN votteryyy_elections e ON v.election_id = e.id
+        LEFT JOIN votteryy_lottery_tickets lt ON v.voting_id = lt.voting_id
+        WHERE v.user_id = $1 AND v.status = 'valid'
+        
+        UNION ALL
+        
+        -- Anonymous votes (via participation table)
+        SELECT 
+          av.id,
+          av.voting_id,
+          av.election_id,
+          vp.user_id,
+          av.receipt_id,
+          av.vote_hash,
+          'valid' as status,
+          av.voted_at as created_at,
+          av.voted_at as updated_at,
+          TRUE as anonymous,
+          FALSE as is_edited,
+          e.title as election_title,
+          e.status as election_status,
+          e.is_free,
+          e.general_participation_fee,
+          e.lottery_enabled,
+          lt.ball_number,
+          lt.ticket_number as lottery_ticket_number,
+          lt.ticket_id,
+          TRUE as is_anonymous_vote
+        FROM votteryyy_anonymous_votes av
+        INNER JOIN votteryyy_voter_participation vp ON av.voting_session_id = vp.voting_session_id
+        LEFT JOIN votteryyy_elections e ON av.election_id = e.id
+        LEFT JOIN votteryy_lottery_tickets lt ON av.voting_id = lt.voting_id
+        WHERE vp.user_id = $1
+      )
       SELECT 
-        v.id,
-        v.voting_id,
-        v.election_id,
-        v.user_id,
-        v.receipt_id,
-        v.vote_hash,
-        v.status,
-        v.created_at,
-        v.anonymous,
-        e.title as election_title,
-        e.status as election_status,
-        e.is_free,
-        e.general_participation_fee,
-        e.lottery_enabled,
-        lt.ball_number,
-        lt.ticket_number as lottery_ticket_number,
-        lt.ticket_id,
+        *,
         CASE 
-          WHEN e.status = 'completed' THEN 'Draw Completed'
-          WHEN e.status = 'active' OR e.status = 'published' THEN 'Pending Draw'
+          WHEN election_status = 'completed' THEN 'Draw Completed'
+          WHEN election_status = 'active' OR election_status = 'published' THEN 'Pending Draw'
           ELSE 'Pending Draw'
         END as lottery_status,
         CASE 
-          WHEN e.is_free = false THEN e.general_participation_fee
+          WHEN is_free = false THEN general_participation_fee
           ELSE 0
         END as payment_amount,
         'USD' as payment_currency
-      FROM votteryy_votes v
-      LEFT JOIN votteryyy_elections e ON v.election_id = e.id
-      LEFT JOIN votteryy_lottery_tickets lt ON v.voting_id = lt.voting_id
-      WHERE v.user_id = $1 AND v.status = 'valid'
-      ORDER BY v.created_at DESC
+      FROM combined_votes
+      ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
     `;
 
     const result = await pool.query(query, [String(userId), limit, offset]);
 
-    console.log('✅ Found', result.rows.length, 'votes for user');
+    // Get total count (both normal + anonymous)
+    const countQuery = `
+      SELECT 
+        (
+          SELECT COUNT(*) 
+          FROM votteryy_votes 
+          WHERE user_id = $1 AND status = 'valid'
+        ) + 
+        (
+          SELECT COUNT(*) 
+          FROM votteryyy_anonymous_votes av
+          INNER JOIN votteryyy_voter_participation vp ON av.voting_session_id = vp.voting_session_id
+          WHERE vp.user_id = $1
+        ) as total
+    `;
+    
+    const countResult = await pool.query(countQuery, [String(userId)]);
+    const total = parseInt(countResult.rows[0].total);
+
+    console.log('✅ Found', result.rows.length, 'votes for user (Normal + Anonymous)');
+    console.log('📊 Total votes:', total);
 
     res.status(200).json({
       success: true,
@@ -1530,6 +1589,91 @@ export const getVotingHistory = async (req, res) => {
     });
   }
 };
+// export const getVotingHistory = async (req, res) => {
+//   try {
+//     const userId = req.user?.userId || req.headers['x-user-id'];
+//     const page = parseInt(req.query.page) || 1;
+//     const limit = parseInt(req.query.limit) || 10;
+//     const offset = (page - 1) * limit;
+
+//     console.log('📜 Getting voting history for user:', userId);
+
+//     if (!userId) {
+//       return res.status(401).json({ error: 'Authentication required' });
+//     }
+
+//     // Get total count
+//     const countQuery = `
+//       SELECT COUNT(*) as total
+//       FROM votteryy_votes
+//       WHERE user_id = $1 AND status = 'valid'
+//     `;
+//     const countResult = await pool.query(countQuery, [String(userId)]);
+//     const total = parseInt(countResult.rows[0].total);
+
+//     // Get votes with election details and lottery info
+//     const query = `
+//       SELECT 
+//         v.id,
+//         v.voting_id,
+//         v.election_id,
+//         v.user_id,
+//         v.receipt_id,
+//         v.vote_hash,
+//         v.status,
+//         v.created_at,
+//         v.anonymous,
+//         e.title as election_title,
+//         e.status as election_status,
+//         e.is_free,
+//         e.general_participation_fee,
+//         e.lottery_enabled,
+//         lt.ball_number,
+//         lt.ticket_number as lottery_ticket_number,
+//         lt.ticket_id,
+//         CASE 
+//           WHEN e.status = 'completed' THEN 'Draw Completed'
+//           WHEN e.status = 'active' OR e.status = 'published' THEN 'Pending Draw'
+//           ELSE 'Pending Draw'
+//         END as lottery_status,
+//         CASE 
+//           WHEN e.is_free = false THEN e.general_participation_fee
+//           ELSE 0
+//         END as payment_amount,
+//         'USD' as payment_currency
+//       FROM votteryy_votes v
+//       LEFT JOIN votteryyy_elections e ON v.election_id = e.id
+//       LEFT JOIN votteryy_lottery_tickets lt ON v.voting_id = lt.voting_id
+//       WHERE v.user_id = $1 AND v.status = 'valid'
+//       ORDER BY v.created_at DESC
+//       LIMIT $2 OFFSET $3
+//     `;
+
+//     const result = await pool.query(query, [String(userId), limit, offset]);
+
+//     console.log('✅ Found', result.rows.length, 'votes for user');
+
+//     res.status(200).json({
+//       success: true,
+//       data: {
+//         votes: result.rows,
+//         pagination: {
+//           currentPage: page,
+//           limit,
+//           total,
+//           totalPages: Math.ceil(total / limit)
+//         }
+//       }
+//     });
+//   } catch (error) {
+//     console.error('❌ Error fetching voting history:', error);
+//     res.status(500).json({
+//       success: false,
+//       message: 'Failed to fetch voting history',
+//       error: error.message
+//     });
+//   }
+// };
 
 // ========================================
 // GET AUDIT LOGS (Admin only)
