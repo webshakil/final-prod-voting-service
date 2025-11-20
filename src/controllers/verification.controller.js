@@ -6,123 +6,311 @@ import { generateHash } from '../utils/crypto.js';
 class VerificationController {
 
   // Verify vote by receipt ID
-  async verifyByReceipt(req, res) {
-    try {
-      const { receiptId } = req.params;
+  async verifyByReceipt  (req, res)  {
+  try {
+    const { receiptId } = req.params;
 
-      console.log('🔍 Verifying receipt:', receiptId);
+    console.log('🔍 Verifying receipt:', receiptId);
 
-      const result = await pool.query(
-        `SELECT 
-           vr.*,
-           v.vote_hash,
-           v.receipt_id as string_receipt_id,
-           v.verification_code,
-           v.created_at as vote_timestamp,
-           e.title as election_title
-         FROM votteryy_votes v
-         JOIN votteryy_vote_receipts vr ON vr.voting_id = v.voting_id
-         JOIN votteryyy_elections e ON vr.election_id = e.id
-         WHERE v.receipt_id = $1`,
-        [receiptId]
-      );
-
-      if (result.rows.length === 0) {
-        console.log('❌ Receipt not found:', receiptId);
-        return res.status(404).json({ error: 'Receipt not found' });
-      }
-
-      const receipt = result.rows[0];
-
-      // Check if vote exists on public bulletin board
-      const bulletinResult = await pool.query(
-        `SELECT * FROM votteryy_public_bulletin_board WHERE vote_hash = $1`,
-        [receipt.vote_hash]
-      );
-
-      const onBulletinBoard = bulletinResult.rows.length > 0;
-
-      console.log('✅ Receipt verified:', receipt.string_receipt_id);
-
-      res.json({
-        verified: true,
-        receipt: {
-          receiptId: receipt.string_receipt_id,
-          verificationCode: receipt.verification_code,
-          voteHash: receipt.vote_hash,
-          electionTitle: receipt.election_title,
-          timestamp: receipt.vote_timestamp
-        },
-        onPublicBulletinBoard: onBulletinBoard,
-        blockHash: onBulletinBoard ? bulletinResult.rows[0].block_hash : null,
-        message: 'Vote successfully verified'
+    if (!receiptId) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Receipt ID is required' 
       });
-
-    } catch (error) {
-      console.error('❌ Verify by receipt error:', error);
-      res.status(500).json({ error: 'Failed to verify receipt' });
     }
+
+    // ========================================
+    // STEP 1: Try to find in NORMAL votes table
+    // ========================================
+    const normalVoteQuery = `
+      SELECT 
+        v.id,
+        v.voting_id,
+        v.receipt_id,
+        v.vote_hash,
+        v.verification_code,
+        v.created_at,
+        v.status,
+        e.title as election_title,
+        FALSE as is_anonymous
+      FROM votteryy_votes v
+      LEFT JOIN votteryyy_elections e ON v.election_id = e.id
+      WHERE v.receipt_id = $1 AND v.status = 'valid'
+    `;
+
+    const normalResult = await pool.query(normalVoteQuery, [receiptId]);
+
+    if (normalResult.rows.length > 0) {
+      const vote = normalResult.rows[0];
+      console.log('✅ Found NORMAL vote:', vote.voting_id);
+
+      return res.json({
+        success: true,
+        verified: true,
+        message: 'Vote verified successfully',
+        receipt: {
+          receiptId: vote.receipt_id,
+          votingId: vote.voting_id,
+          voteHash: vote.vote_hash,
+          verificationCode: vote.verification_code,
+          electionTitle: vote.election_title,
+          timestamp: vote.created_at,
+          status: vote.status,
+          isAnonymous: false
+        }
+      });
+    }
+
+    // ========================================
+    // STEP 2: Try to find in ANONYMOUS votes table
+    // ========================================
+    const anonymousVoteQuery = `
+      SELECT 
+        av.id,
+        av.voting_id,
+        av.receipt_id,
+        av.vote_hash,
+        av.verification_code,
+        av.voted_at as created_at,
+        e.title as election_title,
+        TRUE as is_anonymous
+      FROM votteryyy_anonymous_votes av
+      LEFT JOIN votteryyy_elections e ON av.election_id = e.id
+      WHERE av.receipt_id = $1
+    `;
+
+    const anonymousResult = await pool.query(anonymousVoteQuery, [receiptId]);
+
+    if (anonymousResult.rows.length > 0) {
+      const vote = anonymousResult.rows[0];
+      console.log('✅ Found ANONYMOUS vote:', vote.voting_id);
+
+      return res.json({
+        success: true,
+        verified: true,
+        message: 'Anonymous vote verified successfully',
+        receipt: {
+          receiptId: vote.receipt_id,
+          votingId: vote.voting_id,
+          voteHash: vote.vote_hash,
+          verificationCode: vote.verification_code,
+          electionTitle: vote.election_title,
+          timestamp: vote.created_at,
+          status: 'valid',
+          isAnonymous: true
+        }
+      });
+    }
+
+    // ========================================
+    // STEP 3: Not found in either table
+    // ========================================
+    console.log('❌ Receipt not found in any table:', receiptId);
+
+    return res.status(404).json({
+      success: false,
+      verified: false,
+      error: 'Receipt not found',
+      message: 'This receipt ID does not exist in our system'
+    });
+
+  } catch (error) {
+    console.error('❌ Verification error:', error);
+    res.status(500).json({
+      success: false,
+      verified: false,
+      error: 'Verification failed',
+      message: error.message
+    });
   }
+};
+  // async verifyByReceipt(req, res) {
+  //   try {
+  //     const { receiptId } = req.params;
+
+  //     console.log('🔍 Verifying receipt:', receiptId);
+
+  //     const result = await pool.query(
+  //       `SELECT 
+  //          vr.*,
+  //          v.vote_hash,
+  //          v.receipt_id as string_receipt_id,
+  //          v.verification_code,
+  //          v.created_at as vote_timestamp,
+  //          e.title as election_title
+  //        FROM votteryy_votes v
+  //        JOIN votteryy_vote_receipts vr ON vr.voting_id = v.voting_id
+  //        JOIN votteryyy_elections e ON vr.election_id = e.id
+  //        WHERE v.receipt_id = $1`,
+  //       [receiptId]
+  //     );
+
+  //     if (result.rows.length === 0) {
+  //       console.log('❌ Receipt not found:', receiptId);
+  //       return res.status(404).json({ error: 'Receipt not found' });
+  //     }
+
+  //     const receipt = result.rows[0];
+
+  //     // Check if vote exists on public bulletin board
+  //     const bulletinResult = await pool.query(
+  //       `SELECT * FROM votteryy_public_bulletin_board WHERE vote_hash = $1`,
+  //       [receipt.vote_hash]
+  //     );
+
+  //     const onBulletinBoard = bulletinResult.rows.length > 0;
+
+  //     console.log('✅ Receipt verified:', receipt.string_receipt_id);
+
+  //     res.json({
+  //       verified: true,
+  //       receipt: {
+  //         receiptId: receipt.string_receipt_id,
+  //         verificationCode: receipt.verification_code,
+  //         voteHash: receipt.vote_hash,
+  //         electionTitle: receipt.election_title,
+  //         timestamp: receipt.vote_timestamp
+  //       },
+  //       onPublicBulletinBoard: onBulletinBoard,
+  //       blockHash: onBulletinBoard ? bulletinResult.rows[0].block_hash : null,
+  //       message: 'Vote successfully verified'
+  //     });
+
+  //   } catch (error) {
+  //     console.error('❌ Verify by receipt error:', error);
+  //     res.status(500).json({ error: 'Failed to verify receipt' });
+  //   }
+  // }
 
   // Verify vote by hash
-  async verifyByHash(req, res) {
-    try {
-      const { voteHash } = req.params;
-      const userId = req.user?.userId;
+  async verifyByHash  (req, res) {
+  try {
+    const { voteHash } = req.params;
 
-      const result = await pool.query(
-        `SELECT 
-           pbb.*,
-           e.title as election_title
-         FROM votteryy_public_bulletin_board pbb
-         JOIN votteryyy_elections e ON pbb.election_id = e.id
-         WHERE pbb.vote_hash = $1`,
-        [voteHash]
-      );
+    console.log('🔍 Verifying vote hash:', voteHash);
 
-      if (result.rows.length === 0) {
-        return res.status(404).json({ 
-          verified: false,
-          error: 'Vote not found on public bulletin board' 
-        });
-      }
-
-      const vote = result.rows[0];
-
-      // Verify hash chain
-      let hashChainValid = true;
-      if (vote.previous_block_hash) {
-        const previousResult = await pool.query(
-          `SELECT block_hash FROM votteryy_public_bulletin_board 
-           WHERE election_id = $1 AND timestamp < $2
-           ORDER BY timestamp DESC LIMIT 1`,
-          [vote.election_id, vote.timestamp]
-        );
-
-        if (previousResult.rows.length > 0) {
-          hashChainValid = previousResult.rows[0].block_hash === vote.previous_block_hash;
-        }
-      }
-
-      res.json({
-        verified: true,
-        vote: {
-          voteHash: vote.vote_hash,
-          electionTitle: vote.election_title,
-          timestamp: vote.timestamp,
-          blockHash: vote.block_hash,
-          previousBlockHash: vote.previous_block_hash,
-          merkleRoot: vote.merkle_root
-        },
-        hashChainValid,
-        message: 'Vote found on public bulletin board'
+    if (!voteHash) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Vote hash is required' 
       });
-
-    } catch (error) {
-      console.error('Verify by hash error:', error);
-      res.status(500).json({ error: 'Failed to verify vote hash' });
     }
+
+    // Try normal votes
+    const normalQuery = `
+      SELECT 
+        v.*,
+        e.title as election_title,
+        FALSE as is_anonymous
+      FROM votteryy_votes v
+      LEFT JOIN votteryyy_elections e ON v.election_id = e.id
+      WHERE v.vote_hash = $1 AND v.status = 'valid'
+    `;
+
+    const normalResult = await pool.query(normalQuery, [voteHash]);
+
+    if (normalResult.rows.length > 0) {
+      return res.json({
+        success: true,
+        verified: true,
+        vote: normalResult.rows[0]
+      });
+    }
+
+    // Try anonymous votes
+    const anonymousQuery = `
+      SELECT 
+        av.*,
+        e.title as election_title,
+        TRUE as is_anonymous
+      FROM votteryyy_anonymous_votes av
+      LEFT JOIN votteryyy_elections e ON av.election_id = e.id
+      WHERE av.vote_hash = $1
+    `;
+
+    const anonymousResult = await pool.query(anonymousQuery, [voteHash]);
+
+    if (anonymousResult.rows.length > 0) {
+      return res.json({
+        success: true,
+        verified: true,
+        vote: anonymousResult.rows[0]
+      });
+    }
+
+    return res.status(404).json({
+      success: false,
+      verified: false,
+      error: 'Vote hash not found'
+    });
+
+  } catch (error) {
+    console.error('❌ Verification error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Verification failed',
+      message: error.message
+    });
   }
+};
+  // async verifyByHash(req, res) {
+  //   try {
+  //     const { voteHash } = req.params;
+  //     const userId = req.user?.userId;
+
+  //     const result = await pool.query(
+  //       `SELECT 
+  //          pbb.*,
+  //          e.title as election_title
+  //        FROM votteryy_public_bulletin_board pbb
+  //        JOIN votteryyy_elections e ON pbb.election_id = e.id
+  //        WHERE pbb.vote_hash = $1`,
+  //       [voteHash]
+  //     );
+
+  //     if (result.rows.length === 0) {
+  //       return res.status(404).json({ 
+  //         verified: false,
+  //         error: 'Vote not found on public bulletin board' 
+  //       });
+  //     }
+
+  //     const vote = result.rows[0];
+
+  //     // Verify hash chain
+  //     let hashChainValid = true;
+  //     if (vote.previous_block_hash) {
+  //       const previousResult = await pool.query(
+  //         `SELECT block_hash FROM votteryy_public_bulletin_board 
+  //          WHERE election_id = $1 AND timestamp < $2
+  //          ORDER BY timestamp DESC LIMIT 1`,
+  //         [vote.election_id, vote.timestamp]
+  //       );
+
+  //       if (previousResult.rows.length > 0) {
+  //         hashChainValid = previousResult.rows[0].block_hash === vote.previous_block_hash;
+  //       }
+  //     }
+
+  //     res.json({
+  //       verified: true,
+  //       vote: {
+  //         voteHash: vote.vote_hash,
+  //         electionTitle: vote.election_title,
+  //         timestamp: vote.timestamp,
+  //         blockHash: vote.block_hash,
+  //         previousBlockHash: vote.previous_block_hash,
+  //         merkleRoot: vote.merkle_root
+  //       },
+  //       hashChainValid,
+  //       message: 'Vote found on public bulletin board'
+  //     });
+
+  //   } catch (error) {
+  //     console.error('Verify by hash error:', error);
+  //     res.status(500).json({ error: 'Failed to verify vote hash' });
+  //   }
+  // }
 
   // Verify encryption (Issue #1)
   async verifyEncryption(req, res) {
