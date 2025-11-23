@@ -711,12 +711,14 @@ async confirmPaymentAndBlock(paymentIntentId, electionId) {
   }
 
   calculateProcessingFee(amount, feeConfig) {
-    if (!feeConfig.enabled) return 0;
-    
+    // ✅ FIXED: Apply fee if configured, regardless of enabled flag
+    // If there's no fee amount configured, return 0
     if (feeConfig.type === 'fixed') {
-      return feeConfig.fixedAmount;
+      const fixedFee = parseFloat(feeConfig.fixedAmount) || 0;
+      return fixedFee;
     } else {
-      return (amount * feeConfig.percentage) / 100;
+      const percentage = parseFloat(feeConfig.percentage) || 0;
+      return (amount * percentage) / 100;
     }
   }
 
