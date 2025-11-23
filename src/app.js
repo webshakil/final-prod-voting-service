@@ -14,6 +14,7 @@ import lotteryRoutes from './routes/lottery.routes.js';
 import walletRoutes from './routes/wallet.routes.js';
 import verificationRoutes from './routes/verification.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
+import paymentRoutes from './routes/paymentRoutes.js';
 
 // Import middleware
 import errorHandler from './ middleware/errorHandler.js';
@@ -99,6 +100,7 @@ app.use('/api/lottery', lotteryRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/verification', verificationRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/payments', paymentRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -106,36 +108,8 @@ app.use((req, res) => {
 });
 
 // Add to server.js BEFORE the app.use(errorHandler) line. for tepmporay draws
-// app.post('/api/test/trigger-lottery-draw', async (req, res) => {
-//   try {
-//     const result = await pool.query(
-//       `SELECT e.id 
-//        FROM votteryyy_elections e
-//        LEFT JOIN votteryy_lottery_draws ld ON e.id = ld.election_id
-//        WHERE e.lottery_enabled = true
-//        AND ld.id IS NULL
-//        AND e.lottery_draw_date < NOW()`
-//     );
+// 
 
-//     const results = [];
-//     for (const row of result.rows) {
-//       try {
-//         await lotteryController.autoDrawLottery(row.id);
-//         results.push({ electionId: row.id, status: 'success' });
-//       } catch (error) {
-//         results.push({ electionId: row.id, status: 'failed', error: error.message });
-//       }
-//     }
-
-//     res.json({ 
-//       message: 'Lottery draw test completed',
-//       processed: results.length,
-//       results 
-//     });
-//   } catch (error) {
-//     res.status(500).json({ error: error.message });
-//   }
-// });
 
 // Error handler
 app.use(errorHandler);
