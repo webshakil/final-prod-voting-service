@@ -723,49 +723,7 @@ async getUserProcessingFee(userId) {
     throw error;
   }
 }
-  // async getUserProcessingFee(userId) {
-  //   try {
-  //     const result = await pool.query(
-  //       `SELECT 
-  //          sp.processing_fee_enabled,
-  //          sp.processing_fee_mandatory,
-  //          sp.processing_fee_type,
-  //          sp.processing_fee_fixed_amount,
-  //          sp.processing_fee_percentage
-  //        FROM votteryy_user_subscriptions us
-  //        JOIN votteryy_subscription_plans sp ON us.plan_id = sp.id
-  //        WHERE us.user_id = $1 
-  //          AND us.status = 'active'
-  //          AND us.end_date > NOW()
-  //        ORDER BY us.created_at DESC
-  //        LIMIT 1`,
-  //       [userId]
-  //     );
 
-  //     if (result.rows.length === 0) {
-  //       // ✅ NO SUBSCRIPTION = 0% processing fee (FREE)
-  //       return {
-  //         enabled: false,
-  //         mandatory: false,
-  //         type: 'percentage',
-  //         fixedAmount: 0,
-  //         percentage: 0
-  //       };
-  //     }
-
-  //     const plan = result.rows[0];
-  //     return {
-  //       enabled: plan.processing_fee_enabled,
-  //       mandatory: plan.processing_fee_mandatory,
-  //       type: plan.processing_fee_type,
-  //       fixedAmount: parseFloat(plan.processing_fee_fixed_amount || 0),
-  //       percentage: parseFloat(plan.processing_fee_percentage || 0)
-  //     };
-  //   } catch (error) {
-  //     console.error('Get user processing fee error:', error);
-  //     throw error;
-  //   }
-  // }
 
   calculateProcessingFee(amount, feeConfig) {
     // ✅ FIXED: Apply fee if configured, regardless of enabled flag

@@ -15,6 +15,7 @@ import walletRoutes from './routes/wallet.routes.js';
 import verificationRoutes from './routes/verification.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
 import paymentRoutes from './routes/paymentRoutes.js';
+import analyticsApiKeyRoutes from './routes/analyticsApiKeyRoutes.js';
 
 // Import middleware
 import errorHandler from './ middleware/errorHandler.js';
@@ -101,6 +102,7 @@ app.use('/api/wallet', walletRoutes);
 app.use('/api/verification', verificationRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/payments', paymentRoutes);
+app.use('/api/admin/analytics-api-keys', analyticsApiKeyRoutes);
 
 // 404 handler
 app.use((req, res) => {

@@ -1,42 +1,19 @@
+// src/routes/analytics.routes.js
+// VOTING-SERVICE (3007) - Analytics data endpoints
+// Requires analytics API key (vta_live_xxx or vta_test_xxx)
+
 import express from 'express';
 import analyticsController from '../controllers/analytics.controller.js';
-import roleCheck from '../ middleware/roleCheck.js';
-//import roleCheck from '../middleware/roleCheck.js';
+import analyticsApiKeyAuth from '../ middleware/analyticsApiKeyAuth.js';
+//import analyticsApiKeyAuth from '../middleware/analyticsApiKeyAuth.js';
 
 const router = express.Router();
 
-// Get election analytics
-router.get(
-  '/elections/:electionId/analytics',
-  roleCheck(['admin', 'manager', 'individual_election_creator_subscribed', 'organization_election_creator_subscribed']),
-  analyticsController.getElectionAnalytics
-);
-
-// Get real-time election results
-router.get(
-  '/elections/:electionId/results',
-  analyticsController.getElectionResults
-);
-
-// Get platform analytics (admin only)
-router.get(
-  '/platform/analytics',
-  roleCheck(['admin', 'manager', 'analyst']),
-  analyticsController.getPlatformAnalytics
-);
-
-// Get user voting history
-router.get(
-  '/users/me/voting-history',
-  roleCheck(['voter']),
-  analyticsController.getUserVotingHistory
-);
-
-// Get voter demographics (admin/creator only)
-router.get(
-  '/elections/:electionId/demographics',
-  roleCheck(['admin', 'manager', 'individual_election_creator_subscribed', 'organization_election_creator_subscribed']),
-  analyticsController.getVoterDemographics
-);
+// All routes require valid analytics API key
+router.get('/platform/report', analyticsApiKeyAuth, analyticsController.getComprehensivePlatformReport);
+router.get('/platform/revenue', analyticsApiKeyAuth, analyticsController.getRevenueReport);
+router.get('/platform/realtime', analyticsApiKeyAuth, analyticsController.getRealTimeStats);
+router.get('/elections/:electionId/analytics', analyticsApiKeyAuth, analyticsController.getElectionAnalytics);
+router.get('/elections/:electionId/demographics', analyticsApiKeyAuth, analyticsController.getVoterDemographics);
 
 export default router;
