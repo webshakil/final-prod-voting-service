@@ -153,36 +153,7 @@ if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
     }
   });
 }
-// if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
-//   cron.schedule('0 * * * *', async () => {
-//     console.log('🎰 Running auto-lottery draw cron job...');
-    
-//     try {
-//       const result = await pool.query(
-//         `SELECT e.id FROM votteryyy_elections e
-//          LEFT JOIN votteryy_lottery_draws ld ON e.id = ld.election_id
-//          WHERE e.lottery_enabled = true
-//          AND e.status = 'completed'
-//          AND ld.id IS NULL
-//          AND (e.end_date + COALESCE(e.end_time, '23:59:59'::time))::timestamp < NOW()`
-//       );
 
-//       console.log(`Found ${result.rows.length} elections ready for lottery draw`);
-
-//       for (const row of result.rows) {
-//         try {
-//           await lotteryController.autoDrawLottery(row.id);
-//           console.log(`✅ Auto-drew lottery for election ${row.id}`);
-//         } catch (error) {
-//           console.error(`❌ Failed to draw lottery for election ${row.id}:`, error.message);
-//         }
-//       }
-
-//     } catch (error) {
-//       console.error('Auto-lottery cron error:', error);
-//     }
-//   });
-// }
 
 // Release blocked accounts for completed elections (runs every hour)
 cron.schedule('0 * * * *', async () => {
