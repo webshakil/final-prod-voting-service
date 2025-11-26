@@ -738,43 +738,150 @@ async getUserProcessingFee(userId) {
   }
 
   async processWithdrawal(userId, amount, paymentMethod, paymentDetails) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-      const walletResult = await client.query(
-        `SELECT balance FROM votteryy_wallets WHERE user_id = $1`,
-        [userId]
-      );
+    console.log('💸 Processing withdrawal:', { userId, amount, paymentMethod });
 
-      if (walletResult.rows.length === 0 || walletResult.rows[0].balance < amount) {
-        throw new Error('Insufficient balance');
-      }
+    // Check wallet balance
+    const walletResult = await client.query(
+      `SELECT balance FROM votteryy_wallets WHERE user_id = $1`,
+      [userId]
+    );
 
-      const withdrawalResult = await client.query(
-        `INSERT INTO votteryy_withdrawal_requests
-         (user_id, amount, payment_method, payment_details, status)
-         VALUES ($1, $2, $3, $4, $5)
-         RETURNING *`,
-        [userId, amount, paymentMethod, JSON.stringify(paymentDetails), amount >= 5000 ? 'pending' : 'approved']
-      );
-
-      const withdrawal = withdrawalResult.rows[0];
-
-      if (amount < 5000) {
-        await this.executeWithdrawal(withdrawal.request_id, userId);
-      }
-
-      await client.query('COMMIT');
-
-      return withdrawal;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    if (walletResult.rows.length === 0) {
+      throw new Error('Wallet not found');
     }
+
+    const balance = parseFloat(walletResult.rows[0].balance);
+    console.log('💰 Current balance:', balance);
+
+    if (balance < amount) {
+      throw new Error(`Insufficient balance. Available: $${balance.toFixed(2)}, Requested: $${amount.toFixed(2)}`);
+    }
+
+    // Calculate withdrawal fee (1%)
+    const withdrawalFee = amount * 0.01;
+    const netAmount = amount - withdrawalFee;
+
+    // DEMO MODE: Auto-complete all withdrawals under $5000
+    const requiresReview = amount >= 5000;
+    const initialStatus = requiresReview ? 'pending' : 'completed';
+    const transferId = requiresReview ? null : `demo_tr_${Date.now()}`;
+
+    // Create withdrawal request
+    const withdrawalResult = await client.query(
+      `INSERT INTO votteryy_withdrawal_requests
+       (user_id, amount, fee, net_amount, payment_method, payment_details, status, transfer_id, completed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        userId, 
+        amount, 
+        withdrawalFee, 
+        netAmount, 
+        paymentMethod, 
+        JSON.stringify(paymentDetails), 
+        initialStatus,
+        transferId,
+        requiresReview ? null : new Date()
+      ]
+    );
+
+    const withdrawal = withdrawalResult.rows[0];
+    console.log('📝 Withdrawal created:', withdrawal.request_id, 'Status:', initialStatus);
+
+    // If auto-completed, deduct from wallet
+    if (!requiresReview) {
+      console.log('🎭 DEMO MODE: Auto-completing withdrawal');
+
+      // Deduct from wallet
+      await client.query(
+        `UPDATE votteryy_wallets
+         SET balance = balance - $1, updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $2`,
+        [amount, userId]
+      );
+
+      // Create transaction record
+      await client.query(
+        `INSERT INTO votteryy_transactions
+         (user_id, transaction_type, amount, status, description, metadata)
+         VALUES ($1, 'withdraw', $2, 'success', $3, $4)`,
+        [
+          userId, 
+          amount,
+          `Withdrawal to ${paymentMethod} - ${paymentDetails.accountEmail || 'Account'}`,
+          JSON.stringify({ 
+            withdrawalId: withdrawal.request_id,
+            fee: withdrawalFee,
+            netAmount,
+            demo: true 
+          })
+        ]
+      );
+
+      console.log('✅ DEMO: Withdrawal completed!');
+      console.log(`   Deducted: $${amount.toFixed(2)} | Fee: $${withdrawalFee.toFixed(2)} | Net: $${netAmount.toFixed(2)}`);
+    }
+
+    await client.query('COMMIT');
+
+    return {
+      ...withdrawal,
+      fee: withdrawalFee,
+      netAmount,
+      status: initialStatus
+    };
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('❌ Withdrawal error:', error.message);
+    throw error;
+  } finally {
+    client.release();
   }
+}
+
+  // async processWithdrawal(userId, amount, paymentMethod, paymentDetails) {
+  //   const client = await pool.connect();
+  //   try {
+  //     await client.query('BEGIN');
+
+  //     const walletResult = await client.query(
+  //       `SELECT balance FROM votteryy_wallets WHERE user_id = $1`,
+  //       [userId]
+  //     );
+
+  //     if (walletResult.rows.length === 0 || walletResult.rows[0].balance < amount) {
+  //       throw new Error('Insufficient balance');
+  //     }
+
+  //     const withdrawalResult = await client.query(
+  //       `INSERT INTO votteryy_withdrawal_requests
+  //        (user_id, amount, payment_method, payment_details, status)
+  //        VALUES ($1, $2, $3, $4, $5)
+  //        RETURNING *`,
+  //       [userId, amount, paymentMethod, JSON.stringify(paymentDetails), amount >= 5000 ? 'pending' : 'approved']
+  //     );
+
+  //     const withdrawal = withdrawalResult.rows[0];
+
+  //     if (amount < 5000) {
+  //       await this.executeWithdrawal(withdrawal.request_id, userId);
+  //     }
+
+  //     await client.query('COMMIT');
+
+  //     return withdrawal;
+  //   } catch (error) {
+  //     await client.query('ROLLBACK');
+  //     throw error;
+  //   } finally {
+  //     client.release();
+  //   }
+  // }
 
   async executeWithdrawal(requestId, adminId = null) {
     const client = await pool.connect();
