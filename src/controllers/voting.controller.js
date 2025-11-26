@@ -1781,6 +1781,127 @@ export const getVoteAuditLogs = async (req, res) => {
   }
 };
 
+// ========================================
+// GET PUBLIC BULLETIN BOARD
+// ========================================
+export const getPublicBulletin = async (req, res) => {
+  try {
+    const { electionId } = req.params;
+
+    console.log('📊 Getting public bulletin for election:', electionId);
+
+    // Get election info
+    const electionResult = await pool.query(
+      `SELECT id, title, anonymous_voting_enabled, status 
+       FROM votteryyy_elections WHERE id = $1`,
+      [electionId]
+    );
+
+    if (electionResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Election not found' 
+      });
+    }
+
+    const election = electionResult.rows[0];
+    const isAnonymous = election.anonymous_voting_enabled || false;
+
+    // Determine which table to query
+    const votesTable = isAnonymous ? 'votteryyy_anonymous_votes' : 'votteryy_votes';
+    const statusFilter = isAnonymous ? '' : "AND status = 'valid'";
+
+    // Get total vote count
+    const countResult = await pool.query(
+      `SELECT COUNT(*) as total FROM ${votesTable} WHERE election_id = $1 ${statusFilter}`,
+      [electionId]
+    );
+    const totalVotes = parseInt(countResult.rows[0].total) || 0;
+
+    // Get votes with anonymized data for transparency
+    let votesQuery;
+    if (isAnonymous) {
+      votesQuery = `
+        SELECT 
+          av.voting_id,
+          av.vote_hash,
+          av.voted_at as created_at,
+          'Anonymous Voter #' || ROW_NUMBER() OVER (ORDER BY av.voted_at) as anonymized_user
+        FROM votteryyy_anonymous_votes av
+        WHERE av.election_id = $1
+        ORDER BY av.voted_at DESC
+        LIMIT 100
+      `;
+    } else {
+      votesQuery = `
+        SELECT 
+          v.voting_id,
+          v.vote_hash,
+          v.created_at,
+          'Voter #' || ROW_NUMBER() OVER (ORDER BY v.created_at) as anonymized_user
+        FROM votteryy_votes v
+        WHERE v.election_id = $1 AND v.status = 'valid'
+        ORDER BY v.created_at DESC
+        LIMIT 100
+      `;
+    }
+
+    const votesResult = await pool.query(votesQuery, [electionId]);
+
+    // Build hash chain for verification
+    const hashChain = [];
+    let previousHash = '0000000000000000000000000000000000000000000000000000000000000000';
+
+    votesResult.rows.forEach((vote, index) => {
+      const blockHash = crypto
+        .createHash('sha256')
+        .update(previousHash + vote.vote_hash)
+        .digest('hex');
+
+      hashChain.push({
+        blockNumber: index + 1,
+        voteHash: vote.vote_hash,
+        blockHash: blockHash,
+        timestamp: vote.created_at,
+      });
+
+      previousHash = blockHash;
+    });
+
+    // Generate verification hash (hash of all vote hashes)
+    const allHashes = votesResult.rows.map(v => v.vote_hash).join('');
+    const verificationHash = crypto
+      .createHash('sha256')
+      .update(allHashes + electionId)
+      .digest('hex');
+
+    console.log(`✅ Public bulletin: ${totalVotes} votes, ${hashChain.length} blocks`);
+
+    res.json({
+      success: true,
+      data: {
+        electionId: parseInt(electionId),
+        electionTitle: election.title,
+        electionStatus: election.status,
+        totalVotes,
+        votes: votesResult.rows,
+        hashChain: hashChain.slice(0, 50), // Limit to 50 for performance
+        verificationHash,
+        isAnonymous,
+        lastUpdated: new Date().toISOString(),
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Get public bulletin error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to retrieve public bulletin',
+      message: error.message 
+    });
+  }
+};
+
 
 export default {
   getBallot,
@@ -1791,7 +1912,8 @@ export default {
   getUserVote,
   getLiveResults,
   getVotingHistory,
-  getVoteAuditLogs 
+  getVoteAuditLogs,
+  getPublicBulletin
 };
 //this is last workable codes just to add socket.io above code
 // import pool from '../config/database.js';

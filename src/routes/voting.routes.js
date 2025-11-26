@@ -67,6 +67,10 @@ router.get(
   roleCheck(['admin', 'election_creator']),
   votingController.getVoteAuditLogs
 );
+router.get(
+  '/public-bulletin/:electionId',
+  votingController.getPublicBulletin
+);
 
 export default router;
 // import express from 'express';
