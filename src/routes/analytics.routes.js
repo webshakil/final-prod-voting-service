@@ -75,6 +75,7 @@ router.get('/elections/:electionId/analytics', flexibleAuth, analyticsController
 
 // GET /api/analytics/elections/:electionId/demographics - Voter demographics
 router.get('/elections/:electionId/demographics', flexibleAuth, analyticsController.getVoterDemographics.bind(analyticsController));
+router.get('/revenue/platform', analyticsController.getPlatformRevenueReport);
 
 export default router;
 // // src/routes/analytics.routes.js
