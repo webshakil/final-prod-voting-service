@@ -1162,6 +1162,148 @@ class LotteryController {
     }
   }
 
+
+
+  // Add this method to your LotteryController class (uncommented and fixed)
+
+async autoDrawLottery(electionId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    console.log(`🎰 Auto-draw started for election ${electionId}`);
+
+    const electionResult = await client.query(
+      `SELECT * FROM votteryyy_elections WHERE id = $1`,
+      [electionId]
+    );
+
+    if (electionResult.rows.length === 0) {
+      throw new Error('Election not found');
+    }
+
+    const election = electionResult.rows[0];
+    const now = new Date();
+    const endDate = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
+
+    if (now < endDate) {
+      throw new Error('Election not yet ended');
+    }
+
+    if (!election.lottery_enabled) {
+      throw new Error('Lottery not enabled');
+    }
+
+    // Check if already drawn
+    const existingDraw = await client.query(
+      `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+      [electionId]
+    );
+
+    if (existingDraw.rows.length > 0) {
+      throw new Error('Lottery already drawn');
+    }
+
+    // Select winners
+    const { winners, randomSeed, totalParticipants, prizeDistribution, totalPrizePool, rewardType } = 
+      await rngService.selectLotteryWinners(electionId, election.lottery_winner_count);
+
+    if (winners.length === 0) {
+      throw new Error('No participants found for lottery');
+    }
+
+    // Record lottery draw
+    const drawResult = await client.query(
+      `INSERT INTO votteryy_lottery_draws
+       (election_id, total_participants, winner_count, random_seed, status, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING draw_id`,
+      [
+        electionId,
+        totalParticipants,
+        winners.length,
+        randomSeed,
+        'completed',
+        JSON.stringify({ prizeDistribution, totalPrizePool, autoDrawn: true })
+      ]
+    );
+
+    const drawId = drawResult.rows[0].draw_id;
+    const prizeDistArray = prizeDistribution || [];
+    const winnerRecords = [];
+
+    for (let i = 0; i < winners.length; i++) {
+      const winner = winners[i];
+      const rank = i + 1;
+
+      let prizeAmount = 0;
+      let prizePercentage = 0;
+
+      if (rewardType === 'monetary' && prizeDistArray.length > 0) {
+        const distEntry = prizeDistArray.find(d => d.rank === rank);
+        if (distEntry) {
+          prizePercentage = distEntry.percentage;
+          prizeAmount = (totalPrizePool * prizePercentage) / 100;
+        } else {
+          prizeAmount = totalPrizePool / winners.length;
+          prizePercentage = 100 / winners.length;
+        }
+      }
+
+      // FIX: Added disbursement_status column
+      const winnerResult = await client.query(
+        `INSERT INTO votteryy_lottery_winners
+         (election_id, user_id, ticket_id, rank, prize_amount, prize_percentage, prize_description, prize_type, claimed, disbursement_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING *`,
+        [
+          electionId,
+          winner.user_id,
+          winner.ticket_id,
+          rank,
+          prizeAmount,
+          prizePercentage,
+          election.lottery_prize_description,
+          rewardType,
+          false,
+          'pending_claim'  // Added this
+        ]
+      );
+
+      winnerRecords.push(winnerResult.rows[0]);
+
+      // Log winner
+      console.log(`🏆 Winner (Rank ${rank}): User ${winner.user_id} won ${rewardType === 'monetary' ? `$${prizeAmount.toFixed(2)}` : election.lottery_prize_description}`);
+    }
+
+    // Audit log
+    await client.query(
+      `INSERT INTO votteryy_audit_logs 
+       (action, entity_type, entity_id, user_id, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        'LOTTERY_AUTO_DRAWN',
+        'election',
+        electionId,
+        null,  // System/auto draw
+        JSON.stringify({ draw_id: drawId, total_participants: totalParticipants, winner_count: winners.length })
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    console.log(`✅ Auto-drew lottery for election ${electionId}, ${winners.length} winners`);
+    return { success: true, drawId, winners: winnerRecords };
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error(`❌ Auto-draw lottery error for election ${electionId}:`, error.message);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
   // ADMIN: UPDATE DISBURSEMENT CONFIG
   async updateDisbursementConfig(req, res) {
     try {
@@ -1206,6 +1348,11 @@ class LotteryController {
 }
 
 export default new LotteryController();
+
+
+
+
+
 // import pool from '../config/database.js';
 // import rngService from '../services/rng.service.js';
 // import auditService from '../services/audit.service.js';

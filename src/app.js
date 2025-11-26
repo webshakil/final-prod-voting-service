@@ -120,11 +120,12 @@ app.use(errorHandler);
 // CRON JOBS
 // ===========================
 
+
 // Auto-draw lotteries for completed elections (runs every hour)
 // Auto-draw lotteries for completed elections (runs every hour)
 if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
   cron.schedule('0 * * * *', async () => {
-    console.log('🎰 Running auto-lottery draw cron job...');
+    console.log('🎰 Running auto-lottery draw cron job at', new Date().toISOString());
     
     try {
       const result = await pool.query(
@@ -132,12 +133,15 @@ if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
          FROM votteryyy_elections e
          LEFT JOIN votteryy_lottery_draws ld ON e.id = ld.election_id
          WHERE e.lottery_enabled = true
-         AND ld.id IS NULL
-         AND e.lottery_draw_date IS NOT NULL
-         AND e.lottery_draw_date < NOW()`
+           AND ld.draw_id IS NULL
+           AND (
+             (e.lottery_draw_date IS NOT NULL AND e.lottery_draw_date <= NOW())
+             OR 
+             (e.lottery_draw_date IS NULL AND (e.end_date + COALESCE(e.end_time, '23:59:59')::time) <= NOW())
+           )`
       );
 
-      console.log(`Found ${result.rows.length} elections ready for lottery draw`);
+      console.log(`📋 Found ${result.rows.length} elections ready for lottery draw`);
 
       for (const row of result.rows) {
         try {
@@ -149,9 +153,11 @@ if (process.env.LOTTERY_AUTO_DRAW_ENABLED === 'true') {
       }
 
     } catch (error) {
-      console.error('Auto-lottery cron error:', error);
+      console.error('❌ Auto-lottery cron error:', error);
     }
   });
+
+  console.log('🎰 Lottery auto-draw cron scheduled (every hour)');
 }
 
 
