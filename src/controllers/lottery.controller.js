@@ -17,6 +17,38 @@ const DISBURSEMENT_CONFIG = {
 
 async function loadDisbursementConfig() {
   try {
+    // ✅ FIXED: Use config_id, NUMERIC type, and VARCHAR for updated_by to match your table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS votteryy_disbursement_config (
+        config_id SERIAL PRIMARY KEY,
+        config_key VARCHAR(100) UNIQUE NOT NULL,
+        config_value NUMERIC(15,2) NOT NULL,
+        description TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_by VARCHAR(255)
+      )
+    `);
+
+    // Check if table has data
+    const countResult = await pool.query(`SELECT COUNT(*) as count FROM votteryy_disbursement_config`);
+    
+    // If empty, seed with default values from ENV/hardcoded
+    if (parseInt(countResult.rows[0].count) === 0) {
+      console.log('📝 Seeding disbursement config table with defaults...');
+      await pool.query(`
+        INSERT INTO votteryy_disbursement_config (config_key, config_value, description)
+        VALUES 
+          ('AUTO_DISBURSE_THRESHOLD', $1, 'Amounts below this are automatically credited to user wallets'),
+          ('LARGE_AMOUNT_THRESHOLD', $2, 'Amounts above this require Manager approval'),
+          ('MAX_AUTO_DISBURSE_DAILY', $3, 'Maximum total amount for automatic daily disbursements')
+        ON CONFLICT (config_key) DO NOTHING
+      `, [
+        DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD,
+        DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD,
+        DISBURSEMENT_CONFIG.MAX_AUTO_DISBURSE_DAILY
+      ]);
+    }
+
     const result = await pool.query(
       `SELECT config_key, config_value FROM votteryy_disbursement_config`
     );
@@ -32,6 +64,26 @@ async function loadDisbursementConfig() {
   }
 }
 loadDisbursementConfig();
+
+// =====================================================
+// HELPER: Get fresh config from database
+// =====================================================
+async function getFreshConfig() {
+  try {
+    const result = await pool.query(
+      `SELECT config_key, config_value FROM votteryy_disbursement_config`
+    );
+    const config = { ...DISBURSEMENT_CONFIG };
+    result.rows.forEach(row => {
+      if (config.hasOwnProperty(row.config_key)) {
+        config[row.config_key] = parseFloat(row.config_value);
+      }
+    });
+    return config;
+  } catch (error) {
+    return DISBURSEMENT_CONFIG;
+  }
+}
 
 class LotteryController {
 
@@ -309,7 +361,11 @@ async getLotteryInfo(req, res) {
       const { winnerId } = req.params;
       const userId = req.user.userId;
 
+      // ✅ Get fresh config from database
+      const config = await getFreshConfig();
+
       console.log(`🎁 Claim prize request: winnerId=${winnerId}, userId=${userId}`);
+      console.log(`💰 Using config thresholds:`, config);
 
       const winnerResult = await client.query(
         `SELECT lw.*, e.title as election_title, e.lottery_reward_type
@@ -346,11 +402,11 @@ async getLotteryInfo(req, res) {
       let autoDisbursed = false;
 
       if (rewardType === 'monetary' && prizeAmount > 0) {
-        if (prizeAmount >= DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD) {
+        if (prizeAmount >= config.LARGE_AMOUNT_THRESHOLD) {
           disbursementStatus = 'pending_senior_approval';
           requiresApproval = true;
           console.log(`💰 Large amount ($${prizeAmount}) - requires senior approval`);
-        } else if (prizeAmount >= DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD) {
+        } else if (prizeAmount >= config.AUTO_DISBURSE_THRESHOLD) {
           disbursementStatus = 'pending_approval';
           requiresApproval = true;
           console.log(`💰 Medium amount ($${prizeAmount}) - requires admin approval`);
@@ -438,8 +494,8 @@ async getLotteryInfo(req, res) {
         auto_disbursed: autoDisbursed,
         new_balance: newBalance,
         thresholds: {
-          auto_threshold: DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD,
-          large_threshold: DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD,
+          auto_threshold: config.AUTO_DISBURSE_THRESHOLD,
+          large_threshold: config.LARGE_AMOUNT_THRESHOLD,
         }
       });
 
@@ -1347,26 +1403,91 @@ async autoDrawLottery(electionId) {
   }
 }
 
+  // ============================================
   // ADMIN: UPDATE DISBURSEMENT CONFIG
+  // ============================================
   async updateDisbursementConfig(req, res) {
     try {
       const adminId = req.user.userId;
       const { config_key, config_value } = req.body;
 
-      if (!['AUTO_DISBURSE_THRESHOLD', 'LARGE_AMOUNT_THRESHOLD', 'MAX_AUTO_DISBURSE_DAILY'].includes(config_key)) {
-        return res.status(400).json({ error: 'Invalid config key' });
+      // Validate config key
+      const validKeys = ['AUTO_DISBURSE_THRESHOLD', 'LARGE_AMOUNT_THRESHOLD', 'MAX_AUTO_DISBURSE_DAILY'];
+      if (!validKeys.includes(config_key)) {
+        return res.status(400).json({ 
+          error: 'Invalid config key',
+          valid_keys: validKeys
+        });
       }
 
+      // Validate config value
+      const numValue = parseFloat(config_value);
+      if (isNaN(numValue) || numValue < 0) {
+        return res.status(400).json({ error: 'Config value must be a positive number' });
+      }
+
+      // Validate logical constraints
+      if (config_key === 'AUTO_DISBURSE_THRESHOLD') {
+        const largeThreshold = DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD;
+        if (numValue >= largeThreshold) {
+          return res.status(400).json({ 
+            error: `Auto disburse threshold must be less than large amount threshold ($${largeThreshold})`
+          });
+        }
+      }
+
+      if (config_key === 'LARGE_AMOUNT_THRESHOLD') {
+        const autoThreshold = DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD;
+        if (numValue <= autoThreshold) {
+          return res.status(400).json({ 
+            error: `Large amount threshold must be greater than auto disburse threshold ($${autoThreshold})`
+          });
+        }
+      }
+
+      // ✅ FIXED: Use UPSERT with correct column types for your table
+      // config_value is NUMERIC(15,2), updated_by is VARCHAR(255)
       await pool.query(
-        `UPDATE votteryy_disbursement_config 
-         SET config_value = $1, updated_at = CURRENT_TIMESTAMP, updated_by = $2
-         WHERE config_key = $3`,
-        [config_value, adminId, config_key]
+        `INSERT INTO votteryy_disbursement_config (config_key, config_value, updated_at, updated_by)
+         VALUES ($1, $2, CURRENT_TIMESTAMP, $3)
+         ON CONFLICT (config_key) 
+         DO UPDATE SET 
+           config_value = $2, 
+           updated_at = CURRENT_TIMESTAMP, 
+           updated_by = $3`,
+        [config_key, numValue, adminId.toString()]
       );
 
-      DISBURSEMENT_CONFIG[config_key] = parseFloat(config_value);
+      // Update in-memory config
+      DISBURSEMENT_CONFIG[config_key] = numValue;
 
-      res.json({ success: true, message: 'Configuration updated', config: DISBURSEMENT_CONFIG });
+      // Audit log
+      await pool.query(
+        `INSERT INTO votteryy_audit_logs 
+         (action, entity_type, entity_id, user_id, details)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          'DISBURSEMENT_CONFIG_UPDATED',
+          'system_config',
+          config_key,
+          adminId,
+          JSON.stringify({ 
+            config_key, 
+            new_value: numValue,
+            updated_by: adminId 
+          })
+        ]
+      );
+
+      console.log(`✅ Config updated: ${config_key} = ${numValue} by admin ${adminId}`);
+
+      res.json({ 
+        success: true, 
+        message: `Configuration "${config_key}" updated successfully`,
+        config_key,
+        config_value: numValue,
+        current: DISBURSEMENT_CONFIG 
+      });
 
     } catch (error) {
       console.error('❌ Update config error:', error);
@@ -1374,23 +1495,3201 @@ async autoDrawLottery(electionId) {
     }
   }
 
+  // ============================================
   // ADMIN: GET DISBURSEMENT CONFIG
+  // ✅ FIXED: Use config_id instead of id, handle VARCHAR updated_by
+  // ============================================
   async getDisbursementConfig(req, res) {
     try {
       const result = await pool.query(
-        `SELECT * FROM votteryy_disbursement_config ORDER BY config_key`
+        `SELECT config_id, config_key, config_value, description, updated_at, updated_by 
+         FROM votteryy_disbursement_config 
+         ORDER BY config_key`
       );
 
-      res.json({ config: result.rows, current: DISBURSEMENT_CONFIG });
+      // Get admin names for updated_by (updated_by is VARCHAR in your table)
+      const configWithAdminNames = await Promise.all(result.rows.map(async (row) => {
+        let updatedByName = null;
+        if (row.updated_by) {
+          try {
+            const adminResult = await pool.query(
+              `SELECT first_name, last_name FROM votteryy_user_details WHERE user_id = $1`,
+              [parseInt(row.updated_by)]
+            );
+            if (adminResult.rows.length > 0) {
+              updatedByName = `${adminResult.rows[0].first_name || ''} ${adminResult.rows[0].last_name || ''}`.trim();
+            }
+          } catch (e) {
+            // Ignore error if updated_by is not a valid user id
+          }
+        }
+        return {
+          id: row.config_id,
+          config_id: row.config_id,
+          config_key: row.config_key,
+          config_value: parseFloat(row.config_value),
+          description: row.description,
+          updated_at: row.updated_at,
+          updated_by: row.updated_by,
+          updated_by_name: updatedByName
+        };
+      }));
+
+      // Get fresh config
+      const currentConfig = await getFreshConfig();
+
+      res.json({ 
+        success: true,
+        config: configWithAdminNames,
+        current: currentConfig,
+        thresholds: {
+          auto_disburse_threshold: currentConfig.AUTO_DISBURSE_THRESHOLD,
+          large_amount_threshold: currentConfig.LARGE_AMOUNT_THRESHOLD,
+          max_auto_disburse_daily: currentConfig.MAX_AUTO_DISBURSE_DAILY,
+          currency: currentConfig.CURRENCY
+        }
+      });
 
     } catch (error) {
       console.error('❌ Get config error:', error);
       res.status(500).json({ error: 'Failed to get configuration' });
     }
   }
+
+  // ============================================
+  // ADMIN: BULK UPDATE DISBURSEMENT CONFIG
+  // ============================================
+  async bulkUpdateDisbursementConfig(req, res) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const adminId = req.user.userId;
+      const { configs } = req.body;
+
+      if (!configs || typeof configs !== 'object') {
+        return res.status(400).json({ error: 'Invalid configs object' });
+      }
+
+      const validKeys = ['AUTO_DISBURSE_THRESHOLD', 'LARGE_AMOUNT_THRESHOLD', 'MAX_AUTO_DISBURSE_DAILY'];
+      const updates = [];
+      const errors = [];
+
+      // Validate all values first
+      for (const [key, value] of Object.entries(configs)) {
+        if (!validKeys.includes(key)) {
+          errors.push({ key, error: 'Invalid config key' });
+          continue;
+        }
+
+        const numValue = parseFloat(value);
+        if (isNaN(numValue) || numValue < 0) {
+          errors.push({ key, error: 'Must be a positive number' });
+          continue;
+        }
+
+        updates.push({ key, value: numValue });
+      }
+
+      // Cross-validate thresholds
+      const autoThreshold = configs.AUTO_DISBURSE_THRESHOLD !== undefined 
+        ? parseFloat(configs.AUTO_DISBURSE_THRESHOLD) 
+        : DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD;
+      
+      const largeThreshold = configs.LARGE_AMOUNT_THRESHOLD !== undefined 
+        ? parseFloat(configs.LARGE_AMOUNT_THRESHOLD) 
+        : DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD;
+
+      if (autoThreshold >= largeThreshold) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          error: 'Auto disburse threshold must be less than large amount threshold',
+          auto_threshold: autoThreshold,
+          large_threshold: largeThreshold
+        });
+      }
+
+      if (errors.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Validation errors', details: errors });
+      }
+
+      // Perform updates
+      for (const { key, value } of updates) {
+        await client.query(
+          `INSERT INTO votteryy_disbursement_config (config_key, config_value, updated_at, updated_by)
+           VALUES ($1, $2, CURRENT_TIMESTAMP, $3)
+           ON CONFLICT (config_key) 
+           DO UPDATE SET 
+             config_value = $2, 
+             updated_at = CURRENT_TIMESTAMP, 
+             updated_by = $3`,
+          [key, value, adminId.toString()]
+        );
+
+        // Update in-memory config
+        DISBURSEMENT_CONFIG[key] = value;
+      }
+
+      // Audit log
+      await client.query(
+        `INSERT INTO votteryy_audit_logs 
+         (action, entity_type, entity_id, user_id, details)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          'DISBURSEMENT_CONFIG_BULK_UPDATED',
+          'system_config',
+          null,
+          adminId,
+          JSON.stringify({ updates: configs, updated_by: adminId })
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      console.log(`✅ Bulk config updated by admin ${adminId}:`, configs);
+
+      res.json({ 
+        success: true, 
+        message: `Updated ${updates.length} configuration(s)`,
+        updated: updates.map(u => u.key),
+        current: DISBURSEMENT_CONFIG 
+      });
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('❌ Bulk update config error:', error);
+      res.status(500).json({ error: 'Failed to update configurations' });
+    } finally {
+      client.release();
+    }
+  }
 }
 
 export default new LotteryController();
+// import pool from '../config/database.js';
+// import rngService from '../services/rng.service.js';
+// import auditService from '../services/audit.service.js';
+// import notificationService from '../services/notification.service.js';
+
+// // =====================================================
+// // DISBURSEMENT CONFIGURATION
+// // Priority: Database > ENV > Hardcoded defaults
+// // =====================================================
+// const DISBURSEMENT_CONFIG = {
+//   AUTO_DISBURSE_THRESHOLD: parseFloat(process.env.WALLET_AUTO_PAYOUT_THRESHOLD) || 50,
+//   LARGE_AMOUNT_THRESHOLD: parseFloat(process.env.WALLET_LARGE_PAYOUT_THRESHOLD) || 1000,
+//   MAX_AUTO_DISBURSE_DAILY: parseFloat(process.env.WALLET_MAX_AUTO_DAILY) || 50000,
+//   CURRENCY: process.env.WALLET_CURRENCY || 'USD',
+// };
+
+// // =====================================================
+// // LOAD CONFIG FROM DATABASE (with table auto-creation)
+// // =====================================================
+// async function loadDisbursementConfig() {
+//   try {
+//     // First, ensure the table exists
+//     await pool.query(`
+//       CREATE TABLE IF NOT EXISTS votteryy_disbursement_config (
+//         id SERIAL PRIMARY KEY,
+//         config_key VARCHAR(100) UNIQUE NOT NULL,
+//         config_value VARCHAR(255) NOT NULL,
+//         description TEXT,
+//         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+//         updated_by INTEGER
+//       )
+//     `);
+
+//     // Check if table has data
+//     const countResult = await pool.query(`SELECT COUNT(*) as count FROM votteryy_disbursement_config`);
+    
+//     // If empty, seed with default values from ENV/hardcoded
+//     if (parseInt(countResult.rows[0].count) === 0) {
+//       console.log('📝 Seeding disbursement config table with defaults...');
+//       await pool.query(`
+//         INSERT INTO votteryy_disbursement_config (config_key, config_value, description)
+//         VALUES 
+//           ('AUTO_DISBURSE_THRESHOLD', $1, 'Amounts below this are automatically credited to user wallets'),
+//           ('LARGE_AMOUNT_THRESHOLD', $2, 'Amounts above this require Manager approval'),
+//           ('MAX_AUTO_DISBURSE_DAILY', $3, 'Maximum total amount for automatic daily disbursements'),
+//           ('CURRENCY', $4, 'Default currency for disbursements')
+//         ON CONFLICT (config_key) DO NOTHING
+//       `, [
+//         DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD.toString(),
+//         DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD.toString(),
+//         DISBURSEMENT_CONFIG.MAX_AUTO_DISBURSE_DAILY.toString(),
+//         DISBURSEMENT_CONFIG.CURRENCY
+//       ]);
+//     }
+
+//     // Now load from database
+//     const result = await pool.query(
+//       `SELECT config_key, config_value FROM votteryy_disbursement_config`
+//     );
+    
+//     // Database values override ENV values
+//     result.rows.forEach(row => {
+//       if (row.config_key === 'CURRENCY') {
+//         DISBURSEMENT_CONFIG[row.config_key] = row.config_value;
+//       } else if (DISBURSEMENT_CONFIG.hasOwnProperty(row.config_key)) {
+//         DISBURSEMENT_CONFIG[row.config_key] = parseFloat(row.config_value);
+//       }
+//     });
+    
+//     console.log('✅ Disbursement config loaded from database:', DISBURSEMENT_CONFIG);
+//   } catch (error) {
+//     console.error('⚠️ Error loading disbursement config, using defaults:', error.message);
+//     console.log('⚠️ Using ENV/default disbursement config:', DISBURSEMENT_CONFIG);
+//   }
+// }
+
+// // Load config on startup
+// loadDisbursementConfig();
+
+// // =====================================================
+// // HELPER: Get fresh config from database
+// // =====================================================
+// async function getFreshConfig() {
+//   try {
+//     const result = await pool.query(
+//       `SELECT config_key, config_value FROM votteryy_disbursement_config`
+//     );
+//     const config = { ...DISBURSEMENT_CONFIG };
+//     result.rows.forEach(row => {
+//       if (row.config_key === 'CURRENCY') {
+//         config[row.config_key] = row.config_value;
+//       } else if (config.hasOwnProperty(row.config_key)) {
+//         config[row.config_key] = parseFloat(row.config_value);
+//       }
+//     });
+//     return config;
+//   } catch (error) {
+//     return DISBURSEMENT_CONFIG;
+//   }
+// }
+
+// class LotteryController {
+
+//   _maskWinnerName(firstName, lastName, odayuserId) {
+//     if (!firstName && !lastName) {
+//       return `Winner #${odayuserId}`;
+//     }
+//     const first = firstName ? `${firstName.charAt(0)}***` : '';
+//     const last = lastName ? `${lastName.charAt(0)}***` : '';
+//     return `${first} ${last}`.trim() || `Winner #${odayuserId}`;
+//   }
+
+//   // GET LOTTERY INFO
+//   async getLotteryInfo(req, res) {
+//     try {
+//       const { electionId } = req.params;
+//       const userId = req.user?.userId;
+
+//       console.log(`🎰 Getting lottery info for election ${electionId}`);
+
+//       const result = await pool.query(
+//         `SELECT 
+//            e.id, e.title, e.lottery_enabled, e.lottery_prize_funding_source,
+//            e.lottery_reward_type, e.lottery_total_prize_pool, e.lottery_prize_description,
+//            e.lottery_estimated_value, e.lottery_projected_revenue,
+//            e.lottery_revenue_share_percentage, e.lottery_winner_count,
+//            e.lottery_prize_distribution, e.end_date, e.end_time, e.status
+//          FROM votteryyy_elections e WHERE e.id = $1`,
+//         [electionId]
+//       );
+
+//       if (result.rows.length === 0) {
+//         return res.status(404).json({ error: 'Election not found' });
+//       }
+
+//       const election = result.rows[0];
+
+//       if (!election.lottery_enabled) {
+//         return res.json({ lotteryEnabled: false, lottery_enabled: false });
+//       }
+
+//       const participantResult = await pool.query(
+//         `SELECT COUNT(*) as count FROM votteryy_lottery_tickets WHERE election_id = $1`,
+//         [electionId]
+//       );
+//       const participantCount = parseInt(participantResult.rows[0].count || 0);
+
+//       const drawResult = await pool.query(
+//         `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1 ORDER BY draw_time DESC LIMIT 1`,
+//         [electionId]
+//       );
+//       const drawInfo = drawResult.rows.length > 0 ? drawResult.rows[0] : null;
+
+//       const winnersCheckResult = await pool.query(
+//         `SELECT COUNT(*) as count FROM votteryy_lottery_winners WHERE election_id = $1`,
+//         [electionId]
+//       );
+//       const winnersExist = parseInt(winnersCheckResult.rows[0].count || 0) > 0;
+
+//       const hasBeenDrawn = drawResult.rows.length > 0 || winnersExist;
+
+//       let winners = [];
+//       let currentUserWinner = null;
+
+//       if (hasBeenDrawn) {
+//         const winnersResult = await pool.query(
+//           `SELECT 
+//              lw.winner_id, lw.user_id, lw.rank, lw.prize_amount, lw.prize_percentage,
+//              lw.prize_description, lw.prize_type, lw.claimed, lw.claimed_at,
+//              lw.disbursement_status, lw.disbursed_at, lw.admin_approved_by,
+//              lw.admin_approved_at, lw.rejection_reason, lt.ball_number,
+//              lt.ticket_number, ud.first_name, ud.last_name
+//            FROM votteryy_lottery_winners lw
+//            LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//            LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//            WHERE lw.election_id = $1 ORDER BY lw.rank ASC`,
+//           [electionId]
+//         );
+
+//         winners = winnersResult.rows.map(w => {
+//           const fullName = `${w.first_name || ''} ${w.last_name || ''}`.trim();
+//           const winnerData = {
+//             id: w.winner_id,
+//             winner_id: w.winner_id,
+//             user_id: w.user_id,
+//             rank: w.rank,
+//             prize_amount: parseFloat(w.prize_amount || 0),
+//             prize_percentage: parseFloat(w.prize_percentage || 0),
+//             prize_description: w.prize_description,
+//             prize_type: w.prize_type,
+//             claimed: w.claimed,
+//             claimed_at: w.claimed_at,
+//             disbursement_status: w.disbursement_status || 'pending_claim',
+//             disbursed_at: w.disbursed_at,
+//             ball_number: w.ball_number,
+//             ticket_number: w.ticket_number,
+//             winner_name: fullName || `Winner #${w.rank}`,
+//             display_name: this._maskWinnerName(w.first_name, w.last_name, w.user_id),
+//           };
+
+//           if (userId && w.user_id === String(userId)) {
+//             currentUserWinner = {
+//               ...winnerData,
+//               winner_name: fullName || `User #${w.user_id}`,
+//               display_name: fullName || `User #${w.user_id}`,
+//               isCurrentUser: true,
+//               can_claim: !w.claimed && (!w.disbursement_status || w.disbursement_status === 'pending_claim'),
+//             };
+//           }
+
+//           return winnerData;
+//         });
+//       }
+
+//       const response = {
+//         lotteryEnabled: true,
+//         lottery_enabled: true,
+//         hasBeenDrawn,
+//         has_been_drawn: hasBeenDrawn,
+//         drawTime: drawInfo?.draw_time,
+//         draw_time: drawInfo?.draw_time,
+//         electionTitle: election.title,
+//         election_title: election.title,
+//         rewardType: election.lottery_reward_type,
+//         reward_type: election.lottery_reward_type,
+//         totalPrizePool: parseFloat(election.lottery_total_prize_pool || 0),
+//         total_prize_pool: parseFloat(election.lottery_total_prize_pool || 0),
+//         prizeDescription: election.lottery_prize_description,
+//         prize_description: election.lottery_prize_description,
+//         estimatedValue: parseFloat(election.lottery_estimated_value || 0),
+//         estimated_value: parseFloat(election.lottery_estimated_value || 0),
+//         winnerCount: winners.length > 0 ? winners.length : election.lottery_winner_count,
+//         winner_count: winners.length > 0 ? winners.length : election.lottery_winner_count,
+//         prizeDistribution: election.lottery_prize_distribution || [],
+//         prize_distribution: election.lottery_prize_distribution || [],
+//         participantCount,
+//         participant_count: participantCount,
+//         winners,
+//         currentUserWinner,
+//         current_user_winner: currentUserWinner,
+//       };
+
+//       res.json(response);
+
+//     } catch (error) {
+//       console.error('❌ Get lottery info error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve lottery information' });
+//     }
+//   }
+
+//   // GET PUBLIC WINNERS ANNOUNCEMENT
+//   async getWinnersAnnouncement(req, res) {
+//     try {
+//       const { electionId } = req.params;
+
+//       const electionResult = await pool.query(
+//         `SELECT id, title, lottery_enabled, lottery_reward_type,
+//                 lottery_total_prize_pool, lottery_prize_description
+//          FROM votteryyy_elections WHERE id = $1`,
+//         [electionId]
+//       );
+
+//       if (electionResult.rows.length === 0) {
+//         return res.status(404).json({ error: 'Election not found' });
+//       }
+
+//       const election = electionResult.rows[0];
+
+//       if (!election.lottery_enabled) {
+//         return res.status(400).json({ error: 'Lottery not enabled for this election' });
+//       }
+
+//       const drawResult = await pool.query(
+//         `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+//         [electionId]
+//       );
+
+//       if (drawResult.rows.length === 0) {
+//         return res.json({
+//           announced: false,
+//           message: 'Lottery has not been drawn yet',
+//           electionTitle: election.title,
+//         });
+//       }
+
+//       const draw = drawResult.rows[0];
+
+//       const winnersResult = await pool.query(
+//         `SELECT 
+//            lw.winner_id, lw.rank, lw.prize_amount, lw.prize_percentage,
+//            lw.prize_description, lw.prize_type, lw.claimed, lw.disbursement_status,
+//            lt.ball_number, ud.first_name, ud.last_name
+//          FROM votteryy_lottery_winners lw
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          WHERE lw.election_id = $1 ORDER BY lw.rank ASC`,
+//         [electionId]
+//       );
+
+//       const winners = winnersResult.rows.map(w => {
+//         let displayName;
+//         if (!w.first_name && !w.last_name) {
+//           displayName = `Winner #${w.winner_id}`;
+//         } else {
+//           const first = w.first_name ? `${w.first_name.charAt(0)}***` : '';
+//           const last = w.last_name ? `${w.last_name.charAt(0)}***` : '';
+//           displayName = `${first} ${last}`.trim() || `Winner #${w.winner_id}`;
+//         }
+
+//         return {
+//           rank: w.rank,
+//           prize_amount: parseFloat(w.prize_amount || 0),
+//           prize_percentage: parseFloat(w.prize_percentage || 0),
+//           prize_description: w.prize_description,
+//           prize_type: w.prize_type,
+//           ball_number: w.ball_number,
+//           display_name: displayName,
+//           claimed: w.claimed,
+//           disbursement_status: w.disbursement_status || 'pending_claim',
+//         };
+//       });
+
+//       res.json({
+//         announced: true,
+//         electionId: election.id,
+//         electionTitle: election.title,
+//         drawTime: draw.draw_time,
+//         totalParticipants: draw.total_participants,
+//         totalPrizePool: parseFloat(election.lottery_total_prize_pool || 0),
+//         rewardType: election.lottery_reward_type,
+//         prizeDescription: election.lottery_prize_description,
+//         winners,
+//         randomSeed: draw.random_seed,
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get winners announcement error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve winners announcement' });
+//     }
+//   }
+
+//   // CLAIM LOTTERY PRIZE
+//   async claimPrize(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerId } = req.params;
+//       const userId = req.user.userId;
+
+//       // Get fresh config from database for accurate thresholds
+//       const config = await getFreshConfig();
+
+//       console.log(`🎁 Claim prize request: winnerId=${winnerId}, userId=${userId}`);
+//       console.log(`💰 Using config thresholds:`, config);
+
+//       const winnerResult = await client.query(
+//         `SELECT lw.*, e.title as election_title, e.lottery_reward_type
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          WHERE lw.winner_id = $1`,
+//         [winnerId]
+//       );
+
+//       if (winnerResult.rows.length === 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(404).json({ error: 'Winner record not found' });
+//       }
+
+//       const winner = winnerResult.rows[0];
+
+//       if (winner.user_id !== String(userId)) {
+//         await client.query('ROLLBACK');
+//         return res.status(403).json({ error: 'You are not authorized to claim this prize' });
+//       }
+
+//       if (winner.claimed) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: 'Prize already claimed',
+//           disbursement_status: winner.disbursement_status 
+//         });
+//       }
+
+//       const prizeAmount = parseFloat(winner.prize_amount || 0);
+//       const rewardType = winner.lottery_reward_type || winner.prize_type;
+//       let disbursementStatus = 'pending_claim';
+//       let requiresApproval = false;
+//       let autoDisbursed = false;
+
+//       if (rewardType === 'monetary' && prizeAmount > 0) {
+//         if (prizeAmount >= config.LARGE_AMOUNT_THRESHOLD) {
+//           disbursementStatus = 'pending_senior_approval';
+//           requiresApproval = true;
+//           console.log(`💰 Large amount ($${prizeAmount}) >= $${config.LARGE_AMOUNT_THRESHOLD} - requires senior approval`);
+//         } else if (prizeAmount >= config.AUTO_DISBURSE_THRESHOLD) {
+//           disbursementStatus = 'pending_approval';
+//           requiresApproval = true;
+//           console.log(`💰 Medium amount ($${prizeAmount}) >= $${config.AUTO_DISBURSE_THRESHOLD} - requires admin approval`);
+//         } else {
+//           disbursementStatus = 'disbursed';
+//           autoDisbursed = true;
+//           console.log(`💰 Small amount ($${prizeAmount}) < $${config.AUTO_DISBURSE_THRESHOLD} - auto disbursing`);
+          
+//           await client.query(
+//             `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
+//              VALUES ($1, $2, 0, $3)
+//              ON CONFLICT (user_id)
+//              DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
+//             [userId, prizeAmount, config.CURRENCY]
+//           );
+
+//           await client.query(
+//             `INSERT INTO votteryy_wallet_transactions
+//              (user_id, transaction_type, amount, election_id, status, description, metadata)
+//              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+//             [
+//               userId,
+//               'prize_won',
+//               prizeAmount,
+//               winner.election_id,
+//               'success',
+//               `Lottery Prize Rank #${winner.rank} - ${winner.election_title}`,
+//               JSON.stringify({ winner_id: winnerId, auto_disbursed: true })
+//             ]
+//           );
+//         }
+//       } else if (rewardType === 'non_monetary' || rewardType === 'projected_revenue') {
+//         disbursementStatus = 'pending_approval';
+//         requiresApproval = true;
+//       }
+
+//       await client.query(
+//         `UPDATE votteryy_lottery_winners
+//          SET claimed = true, claimed_at = CURRENT_TIMESTAMP,
+//              disbursement_status = $2,
+//              disbursed_at = CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE NULL END
+//          WHERE winner_id = $1`,
+//         [winnerId, disbursementStatus, autoDisbursed]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'PRIZE_CLAIMED',
+//           'lottery_winner',
+//           winnerId,
+//           userId,
+//           JSON.stringify({
+//             prize_amount: prizeAmount,
+//             reward_type: rewardType,
+//             disbursement_status: disbursementStatus,
+//             requires_approval: requiresApproval,
+//             auto_disbursed: autoDisbursed,
+//             config_used: config
+//           })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       let newBalance = null;
+//       if (autoDisbursed) {
+//         const walletResult = await pool.query(
+//           `SELECT balance FROM votteryy_user_wallets WHERE user_id = $1`,
+//           [userId]
+//         );
+//         newBalance = walletResult.rows[0]?.balance;
+//       }
+
+//       res.json({
+//         success: true,
+//         message: requiresApproval 
+//           ? 'Prize claimed successfully. Awaiting admin approval for disbursement.'
+//           : 'Prize claimed and disbursed to your wallet!',
+//         winner_id: winnerId,
+//         prize_amount: prizeAmount,
+//         disbursement_status: disbursementStatus,
+//         requires_approval: requiresApproval,
+//         auto_disbursed: autoDisbursed,
+//         new_balance: newBalance,
+//         thresholds: {
+//           auto_threshold: config.AUTO_DISBURSE_THRESHOLD,
+//           large_threshold: config.LARGE_AMOUNT_THRESHOLD,
+//         }
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Claim prize error:', error);
+//       res.status(500).json({ error: 'Failed to claim prize' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // GET USER'S WINNING HISTORY
+//   async getUserWinningHistory(req, res) {
+//     try {
+//       const userId = req.user.userId;
+
+//       const result = await pool.query(
+//         `SELECT lw.*, e.title as election_title, e.lottery_reward_type,
+//                 lt.ticket_number, lt.ball_number
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          WHERE lw.user_id = $1 ORDER BY lw.created_at DESC`,
+//         [userId]
+//       );
+
+//       const winnings = result.rows.map(row => ({
+//         winner_id: row.winner_id,
+//         election_id: row.election_id,
+//         election_title: row.election_title,
+//         rank: row.rank,
+//         prize_amount: parseFloat(row.prize_amount || 0),
+//         prize_type: row.prize_type || row.lottery_reward_type,
+//         prize_description: row.prize_description,
+//         ticket_number: row.ticket_number,
+//         ball_number: row.ball_number,
+//         claimed: row.claimed,
+//         claimed_at: row.claimed_at,
+//         disbursement_status: row.disbursement_status || 'pending_claim',
+//         disbursed_at: row.disbursed_at,
+//         rejection_reason: row.rejection_reason,
+//         can_claim: !row.claimed,
+//         created_at: row.created_at,
+//       }));
+
+//       const summary = {
+//         total_wins: winnings.length,
+//         total_won: winnings.reduce((sum, w) => sum + w.prize_amount, 0),
+//         claimed: winnings.filter(w => w.claimed).length,
+//         disbursed: winnings.filter(w => w.disbursement_status === 'disbursed').length,
+//         pending: winnings.filter(w => ['pending_approval', 'pending_senior_approval'].includes(w.disbursement_status)).length,
+//         unclaimed: winnings.filter(w => !w.claimed).length,
+//         rejected: winnings.filter(w => w.disbursement_status === 'rejected').length,
+//       };
+
+//       res.json({ winnings, summary });
+
+//     } catch (error) {
+//       console.error('❌ Get user winning history error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve winning history' });
+//     }
+//   }
+
+//   // ADMIN: GET PENDING APPROVALS
+//   async getPendingApprovals(req, res) {
+//     try {
+//       const { status, minAmount, maxAmount } = req.query;
+
+//       let whereClause = `WHERE lw.disbursement_status IN ('pending_approval', 'pending_senior_approval')`;
+//       const params = [];
+//       let paramIndex = 1;
+
+//       if (status) {
+//         whereClause = `WHERE lw.disbursement_status = $${paramIndex}`;
+//         params.push(status);
+//         paramIndex++;
+//       }
+
+//       if (minAmount) {
+//         whereClause += ` AND lw.prize_amount >= $${paramIndex}`;
+//         params.push(parseFloat(minAmount));
+//         paramIndex++;
+//       }
+
+//       if (maxAmount) {
+//         whereClause += ` AND lw.prize_amount <= $${paramIndex}`;
+//         params.push(parseFloat(maxAmount));
+//         paramIndex++;
+//       }
+
+//       const result = await pool.query(
+//         `SELECT lw.*, e.title as election_title, ud.first_name, ud.last_name,
+//                 CONCAT(COALESCE(ud.first_name, ''), ' ', COALESCE(ud.last_name, '')) as winner_full_name,
+//                 lt.ticket_number, lt.ball_number, uw.balance as user_balance
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          LEFT JOIN votteryy_user_wallets uw ON lw.user_id = uw.user_id
+//          ${whereClause}
+//          ORDER BY lw.prize_amount DESC, lw.claimed_at ASC`,
+//         params
+//       );
+
+//       const config = await getFreshConfig();
+
+//       const pendingApprovals = result.rows.map(row => ({
+//         winner_id: row.winner_id,
+//         election_id: row.election_id,
+//         election_title: row.election_title,
+//         user_id: row.user_id,
+//         winner_name: row.winner_full_name?.trim() || `User #${row.user_id}`,
+//         first_name: row.first_name,
+//         last_name: row.last_name,
+//         rank: row.rank,
+//         prize_amount: parseFloat(row.prize_amount || 0),
+//         prize_type: row.prize_type,
+//         prize_description: row.prize_description,
+//         ticket_number: row.ticket_number,
+//         ball_number: row.ball_number,
+//         claimed_at: row.claimed_at,
+//         disbursement_status: row.disbursement_status,
+//         requires_senior_approval: row.disbursement_status === 'pending_senior_approval',
+//         user_current_balance: parseFloat(row.user_balance || 0),
+//       }));
+
+//       const stats = {
+//         total_pending: pendingApprovals.length,
+//         total_amount: pendingApprovals.reduce((sum, p) => sum + p.prize_amount, 0),
+//         pending_approval: pendingApprovals.filter(p => p.disbursement_status === 'pending_approval').length,
+//         pending_senior_approval: pendingApprovals.filter(p => p.disbursement_status === 'pending_senior_approval').length,
+//       };
+
+//       res.json({
+//         pendingApprovals,
+//         pending_approvals: pendingApprovals,
+//         stats,
+//         thresholds: {
+//           auto_disburse: config.AUTO_DISBURSE_THRESHOLD,
+//           large_amount: config.LARGE_AMOUNT_THRESHOLD,
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get pending approvals error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve pending approvals' });
+//     }
+//   }
+
+//   // ADMIN: APPROVE DISBURSEMENT
+//   async approveDisbursement(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerId } = req.params;
+//       const adminId = req.user.userId;
+//       const adminRoles = req.user.roles || [];
+//       const { notes } = req.body;
+
+//       const config = await getFreshConfig();
+
+//       const winnerResult = await client.query(
+//         `SELECT lw.*, e.title as election_title
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          WHERE lw.winner_id = $1`,
+//         [winnerId]
+//       );
+
+//       if (winnerResult.rows.length === 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(404).json({ error: 'Winner record not found' });
+//       }
+
+//       const winner = winnerResult.rows[0];
+//       const prizeAmount = parseFloat(winner.prize_amount || 0);
+
+//       if (winner.disbursement_status === 'pending_senior_approval') {
+//         if (!adminRoles.includes('manager')) {
+//           await client.query('ROLLBACK');
+//           return res.status(403).json({ 
+//             error: 'This disbursement requires Manager approval due to large amount',
+//             required_role: 'manager',
+//             prize_amount: prizeAmount,
+//             threshold: config.LARGE_AMOUNT_THRESHOLD
+//           });
+//         }
+//       }
+
+//       if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: `Cannot approve disbursement with status: ${winner.disbursement_status}` 
+//         });
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
+//          VALUES ($1, $2, 0, $3)
+//          ON CONFLICT (user_id)
+//          DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
+//         [winner.user_id, prizeAmount, config.CURRENCY]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_wallet_transactions
+//          (user_id, transaction_type, amount, election_id, status, description, metadata)
+//          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+//         [
+//           winner.user_id,
+//           'prize_won',
+//           prizeAmount,
+//           winner.election_id,
+//           'success',
+//           `Lottery Prize Rank #${winner.rank} - ${winner.election_title} (Admin Approved)`,
+//           JSON.stringify({ winner_id: winnerId, approved_by: adminId, notes })
+//         ]
+//       );
+
+//       await client.query(
+//         `UPDATE votteryy_lottery_winners
+//          SET disbursement_status = 'disbursed', disbursed_at = CURRENT_TIMESTAMP,
+//              admin_approved_by = $2, admin_approved_at = CURRENT_TIMESTAMP, admin_notes = $3
+//          WHERE winner_id = $1`,
+//         [winnerId, adminId, notes]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'PRIZE_DISBURSEMENT_APPROVED',
+//           'lottery_winner',
+//           winnerId,
+//           adminId,
+//           JSON.stringify({
+//             winner_user_id: winner.user_id,
+//             prize_amount: prizeAmount,
+//             election_id: winner.election_id,
+//             notes
+//           })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       const walletResult = await pool.query(
+//         `SELECT balance FROM votteryy_user_wallets WHERE user_id = $1`,
+//         [winner.user_id]
+//       );
+
+//       res.json({
+//         success: true,
+//         message: 'Prize disbursement approved and funds transferred to winner wallet',
+//         winner_id: winnerId,
+//         user_id: winner.user_id,
+//         prize_amount: prizeAmount,
+//         disbursement_status: 'disbursed',
+//         approved_by: adminId,
+//         approved_at: new Date().toISOString(),
+//         new_balance: parseFloat(walletResult.rows[0]?.balance || 0),
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Approve disbursement error:', error);
+//       res.status(500).json({ error: 'Failed to approve disbursement' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ADMIN: REJECT DISBURSEMENT
+//   async rejectDisbursement(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerId } = req.params;
+//       const adminId = req.user.userId;
+//       const { reason } = req.body;
+
+//       if (!reason || !reason.trim()) {
+//         return res.status(400).json({ error: 'Rejection reason is required' });
+//       }
+
+//       const winnerResult = await client.query(
+//         `SELECT * FROM votteryy_lottery_winners WHERE winner_id = $1`,
+//         [winnerId]
+//       );
+
+//       if (winnerResult.rows.length === 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(404).json({ error: 'Winner record not found' });
+//       }
+
+//       const winner = winnerResult.rows[0];
+
+//       if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: `Cannot reject disbursement with status: ${winner.disbursement_status}` 
+//         });
+//       }
+
+//       await client.query(
+//         `UPDATE votteryy_lottery_winners
+//          SET disbursement_status = 'rejected', rejection_reason = $2,
+//              admin_approved_by = $3, admin_approved_at = CURRENT_TIMESTAMP
+//          WHERE winner_id = $1`,
+//         [winnerId, reason, adminId]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'PRIZE_DISBURSEMENT_REJECTED',
+//           'lottery_winner',
+//           winnerId,
+//           adminId,
+//           JSON.stringify({
+//             winner_user_id: winner.user_id,
+//             prize_amount: winner.prize_amount,
+//             reason
+//           })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       res.json({
+//         success: true,
+//         message: 'Prize disbursement rejected',
+//         winner_id: winnerId,
+//         disbursement_status: 'rejected',
+//         rejection_reason: reason,
+//         rejected_by: adminId,
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Reject disbursement error:', error);
+//       res.status(500).json({ error: 'Failed to reject disbursement' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ADMIN: BULK APPROVE DISBURSEMENTS
+//   async bulkApproveDisbursements(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerIds } = req.body;
+//       const adminId = req.user.userId;
+//       const adminRoles = req.user.roles || [];
+//       const config = await getFreshConfig();
+
+//       if (!Array.isArray(winnerIds) || winnerIds.length === 0) {
+//         return res.status(400).json({ error: 'Winner IDs array is required' });
+//       }
+
+//       const results = { approved: [], failed: [], skipped: [] };
+
+//       for (const winnerId of winnerIds) {
+//         try {
+//           const winnerResult = await client.query(
+//             `SELECT lw.*, e.title as election_title
+//              FROM votteryy_lottery_winners lw
+//              JOIN votteryyy_elections e ON lw.election_id = e.id
+//              WHERE lw.winner_id = $1`,
+//             [winnerId]
+//           );
+
+//           if (winnerResult.rows.length === 0) {
+//             results.failed.push({ winner_id: winnerId, reason: 'Not found' });
+//             continue;
+//           }
+
+//           const winner = winnerResult.rows[0];
+//           const prizeAmount = parseFloat(winner.prize_amount || 0);
+
+//           if (winner.disbursement_status === 'pending_senior_approval' && !adminRoles.includes('manager')) {
+//             results.skipped.push({ winner_id: winnerId, reason: 'Requires manager approval', prize_amount: prizeAmount });
+//             continue;
+//           }
+
+//           if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
+//             results.skipped.push({ winner_id: winnerId, reason: `Invalid status: ${winner.disbursement_status}` });
+//             continue;
+//           }
+
+//           await client.query(
+//             `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
+//              VALUES ($1, $2, 0, $3)
+//              ON CONFLICT (user_id)
+//              DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
+//             [winner.user_id, prizeAmount, config.CURRENCY]
+//           );
+
+//           await client.query(
+//             `INSERT INTO votteryy_wallet_transactions
+//              (user_id, transaction_type, amount, election_id, status, description, metadata)
+//              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+//             [
+//               winner.user_id,
+//               'prize_won',
+//               prizeAmount,
+//               winner.election_id,
+//               'success',
+//               `Lottery Prize Rank #${winner.rank} - ${winner.election_title} (Bulk Approved)`,
+//               JSON.stringify({ winner_id: winnerId, approved_by: adminId, bulk: true })
+//             ]
+//           );
+
+//           await client.query(
+//             `UPDATE votteryy_lottery_winners
+//              SET disbursement_status = 'disbursed', disbursed_at = CURRENT_TIMESTAMP,
+//                  admin_approved_by = $2, admin_approved_at = CURRENT_TIMESTAMP, admin_notes = 'Bulk approved'
+//              WHERE winner_id = $1`,
+//             [winnerId, adminId]
+//           );
+
+//           results.approved.push({ winner_id: winnerId, user_id: winner.user_id, prize_amount: prizeAmount });
+
+//         } catch (innerError) {
+//           results.failed.push({ winner_id: winnerId, reason: innerError.message });
+//         }
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         ['BULK_PRIZE_DISBURSEMENT', 'lottery_winners', null, adminId, JSON.stringify(results)]
+//       );
+
+//       await client.query('COMMIT');
+
+//       const totalDisbursed = results.approved.reduce((sum, a) => sum + a.prize_amount, 0);
+
+//       res.json({
+//         success: true,
+//         message: `Processed ${winnerIds.length} disbursements`,
+//         results,
+//         summary: {
+//           total: winnerIds.length,
+//           approved: results.approved.length,
+//           failed: results.failed.length,
+//           skipped: results.skipped.length,
+//           total_amount_disbursed: totalDisbursed,
+//         }
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Bulk approve error:', error);
+//       res.status(500).json({ error: 'Failed to process bulk approvals' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ADMIN: GET DISBURSEMENT HISTORY
+//   async getDisbursementHistory(req, res) {
+//     try {
+//       const { electionId, status, fromDate, toDate, page = 1, limit = 20 } = req.query;
+//       const offset = (parseInt(page) - 1) * parseInt(limit);
+
+//       let whereClause = 'WHERE lw.claimed = true';
+//       const params = [];
+//       let paramIndex = 1;
+
+//       if (electionId) {
+//         whereClause += ` AND lw.election_id = $${paramIndex}`;
+//         params.push(electionId);
+//         paramIndex++;
+//       }
+
+//       if (status) {
+//         whereClause += ` AND lw.disbursement_status = $${paramIndex}`;
+//         params.push(status);
+//         paramIndex++;
+//       }
+
+//       if (fromDate) {
+//         whereClause += ` AND lw.claimed_at >= $${paramIndex}`;
+//         params.push(fromDate);
+//         paramIndex++;
+//       }
+
+//       if (toDate) {
+//         whereClause += ` AND lw.claimed_at <= $${paramIndex}`;
+//         params.push(toDate);
+//         paramIndex++;
+//       }
+
+//       const countResult = await pool.query(
+//         `SELECT COUNT(*) as total FROM votteryy_lottery_winners lw ${whereClause}`,
+//         params
+//       );
+//       const total = parseInt(countResult.rows[0].total);
+
+//       params.push(parseInt(limit), offset);
+//       const result = await pool.query(
+//         `SELECT lw.*, e.title as election_title, ud.first_name, ud.last_name,
+//                 CONCAT(COALESCE(ud.first_name, ''), ' ', COALESCE(ud.last_name, '')) as winner_full_name,
+//                 admin_ud.first_name as admin_first_name, admin_ud.last_name as admin_last_name
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_user_details admin_ud ON lw.admin_approved_by::integer = admin_ud.user_id
+//          ${whereClause}
+//          ORDER BY lw.claimed_at DESC
+//          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+//         params
+//       );
+
+//       const disbursements = result.rows.map(row => ({
+//         winner_id: row.winner_id,
+//         election_id: row.election_id,
+//         election_title: row.election_title,
+//         user_id: row.user_id,
+//         winner_name: row.winner_full_name?.trim() || `User #${row.user_id}`,
+//         rank: row.rank,
+//         prize_amount: parseFloat(row.prize_amount || 0),
+//         prize_type: row.prize_type,
+//         claimed: row.claimed,
+//         claimed_at: row.claimed_at,
+//         disbursement_status: row.disbursement_status || 'pending_claim',
+//         disbursed_at: row.disbursed_at,
+//         admin_approved_by: row.admin_approved_by,
+//         admin_name: row.admin_first_name ? `${row.admin_first_name} ${row.admin_last_name}` : null,
+//         admin_approved_at: row.admin_approved_at,
+//         rejection_reason: row.rejection_reason,
+//         admin_notes: row.admin_notes,
+//       }));
+
+//       res.json({
+//         disbursements,
+//         pagination: {
+//           page: parseInt(page),
+//           limit: parseInt(limit),
+//           total,
+//           totalPages: Math.ceil(total / parseInt(limit)),
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get disbursement history error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve disbursement history' });
+//     }
+//   }
+
+//   // GET USER'S LOTTERY TICKET
+//   async getUserTicket(req, res) {
+//     try {
+//       const { electionId } = req.params;
+//       const userId = req.user.userId;
+
+//       const result = await pool.query(
+//         `SELECT * FROM votteryy_lottery_tickets WHERE user_id = $1 AND election_id = $2`,
+//         [userId, electionId]
+//       );
+
+//       if (result.rows.length === 0) {
+//         return res.json({
+//           hasTicket: false,
+//           has_ticket: false,
+//           ticket: null,
+//           message: 'No lottery ticket found. Vote to participate.'
+//         });
+//       }
+
+//       const ticket = result.rows[0];
+
+//       res.json({
+//         hasTicket: true,
+//         has_ticket: true,
+//         ticket: {
+//           id: ticket.ticket_id,
+//           ticket_id: ticket.ticket_id,
+//           ticket_number: ticket.ticket_number,
+//           ball_number: ticket.ball_number,
+//           user_id: ticket.user_id,
+//           election_id: ticket.election_id,
+//           created_at: ticket.created_at,
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get user ticket error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve lottery ticket' });
+//     }
+//   }
+
+//   // GET LOTTERY PARTICIPANTS
+//   async getLotteryParticipants(req, res) {
+//     try {
+//       const { electionId } = req.params;
+
+//       const result = await pool.query(
+//         `SELECT lt.ticket_id, lt.ticket_number, lt.ball_number, lt.user_id, lt.created_at,
+//                 ud.first_name, ud.last_name,
+//                 CONCAT(COALESCE(ud.first_name, ''), ' ', COALESCE(ud.last_name, '')) as full_name
+//          FROM votteryy_lottery_tickets lt
+//          LEFT JOIN votteryy_user_details ud ON lt.user_id::integer = ud.user_id
+//          WHERE lt.election_id = $1 ORDER BY lt.created_at ASC`,
+//         [electionId]
+//       );
+
+//       const participants = result.rows.map(p => ({
+//         id: p.ticket_id,
+//         ticket_id: p.ticket_id,
+//         ticket_number: p.ticket_number,
+//         ball_number: p.ball_number,
+//         user_id: p.user_id,
+//         full_name: p.full_name?.trim() || `User #${p.user_id}`,
+//         first_name: p.first_name,
+//         last_name: p.last_name,
+//         created_at: p.created_at,
+//       }));
+
+//       res.json({
+//         participants,
+//         count: participants.length,
+//         totalCount: participants.length,
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get lottery participants error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve lottery participants' });
+//     }
+//   }
+
+//   // DRAW LOTTERY (Manual - Admin Only)
+//   async drawLottery(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { electionId } = req.params;
+//       const adminId = req.user.userId;
+
+//       if (!req.user.roles.includes('admin') && !req.user.roles.includes('manager')) {
+//         return res.status(403).json({ error: 'Admin access required' });
+//       }
+
+//       const electionResult = await client.query(
+//         `SELECT * FROM votteryyy_elections WHERE id = $1`,
+//         [electionId]
+//       );
+
+//       if (electionResult.rows.length === 0) {
+//         return res.status(404).json({ error: 'Election not found' });
+//       }
+
+//       const election = electionResult.rows[0];
+
+//       if (!election.lottery_enabled) {
+//         return res.status(400).json({ error: 'Lottery not enabled for this election' });
+//       }
+
+//       const existingDrawResult = await client.query(
+//         `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+//         [electionId]
+//       );
+
+//       if (existingDrawResult.rows.length > 0) {
+//         return res.status(400).json({ error: 'Lottery already drawn for this election' });
+//       }
+
+//       const { winners, randomSeed, totalParticipants, prizeDistribution, totalPrizePool, rewardType } = 
+//         await rngService.selectLotteryWinners(electionId, election.lottery_winner_count);
+
+//       if (winners.length === 0) {
+//         return res.status(400).json({ error: 'No participants found for lottery' });
+//       }
+
+//       const drawResult = await client.query(
+//         `INSERT INTO votteryy_lottery_draws
+//          (election_id, total_participants, winner_count, random_seed, status, metadata)
+//          VALUES ($1, $2, $3, $4, $5, $6)
+//          RETURNING draw_id`,
+//         [
+//           electionId,
+//           totalParticipants,
+//           winners.length,
+//           randomSeed,
+//           'completed',
+//           JSON.stringify({ prizeDistribution, totalPrizePool, drawn_by: adminId })
+//         ]
+//       );
+
+//       const drawId = drawResult.rows[0].draw_id;
+//       const prizeDistArray = prizeDistribution || [];
+//       const winnerRecords = [];
+
+//       for (let i = 0; i < winners.length; i++) {
+//         const winner = winners[i];
+//         const rank = i + 1;
+
+//         let prizeAmount = 0;
+//         let prizePercentage = 0;
+
+//         if (rewardType === 'monetary' && prizeDistArray.length > 0) {
+//           const distEntry = prizeDistArray.find(d => d.rank === rank);
+//           if (distEntry) {
+//             prizePercentage = distEntry.percentage;
+//             prizeAmount = (totalPrizePool * prizePercentage) / 100;
+//           } else {
+//             prizeAmount = totalPrizePool / winners.length;
+//             prizePercentage = 100 / winners.length;
+//           }
+//         }
+
+//         const winnerResult = await client.query(
+//           `INSERT INTO votteryy_lottery_winners
+//            (election_id, user_id, ticket_id, rank, prize_amount, prize_percentage, prize_description, prize_type, claimed, disbursement_status)
+//            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+//            RETURNING *`,
+//           [
+//             electionId, winner.user_id, winner.ticket_id, rank, prizeAmount, prizePercentage,
+//             election.lottery_prize_description, rewardType, false, 'pending_claim'
+//           ]
+//         );
+
+//         winnerRecords.push(winnerResult.rows[0]);
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'LOTTERY_DRAWN', 'election', electionId, adminId,
+//           JSON.stringify({ draw_id: drawId, total_participants: totalParticipants, winner_count: winners.length })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       res.json({
+//         success: true,
+//         drawId,
+//         draw_id: drawId,
+//         totalParticipants,
+//         total_participants: totalParticipants,
+//         winners: winnerRecords.map(w => ({ ...w, prize_amount: parseFloat(w.prize_amount || 0) })),
+//         randomSeed,
+//         random_seed: randomSeed,
+//         message: 'Lottery drawn successfully. Winners can now claim their prizes.'
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Draw lottery error:', error);
+//       res.status(500).json({ error: 'Failed to draw lottery' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // AUTO DRAW LOTTERY
+//   async autoDrawLottery(electionId) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const electionResult = await client.query(
+//         `SELECT * FROM votteryyy_elections WHERE id = $1`,
+//         [electionId]
+//       );
+
+//       if (electionResult.rows.length === 0) {
+//         throw new Error('Election not found');
+//       }
+
+//       const election = electionResult.rows[0];
+//       const now = new Date();
+//       const endDate = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
+
+//       if (now < endDate) {
+//         throw new Error('Election not yet ended');
+//       }
+
+//       if (!election.lottery_enabled) {
+//         throw new Error('Lottery not enabled');
+//       }
+
+//       const existingDraw = await client.query(
+//         `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+//         [electionId]
+//       );
+
+//       if (existingDraw.rows.length > 0) {
+//         throw new Error('Lottery already drawn');
+//       }
+
+//       const { winners, randomSeed, totalParticipants, prizeDistribution, totalPrizePool, rewardType } = 
+//         await rngService.selectLotteryWinners(electionId, election.lottery_winner_count);
+
+//       if (winners.length === 0) {
+//         throw new Error('No participants found for lottery');
+//       }
+
+//       const drawResult = await client.query(
+//         `INSERT INTO votteryy_lottery_draws
+//          (election_id, total_participants, winner_count, random_seed, status, metadata)
+//          VALUES ($1, $2, $3, $4, $5, $6)
+//          RETURNING draw_id`,
+//         [
+//           electionId,
+//           totalParticipants,
+//           winners.length,
+//           randomSeed,
+//           'completed',
+//           JSON.stringify({ prizeDistribution, totalPrizePool, autoDrawn: true })
+//         ]
+//       );
+
+//       const drawId = drawResult.rows[0].draw_id;
+//       const prizeDistArray = prizeDistribution || [];
+//       const winnerRecords = [];
+
+//       for (let i = 0; i < winners.length; i++) {
+//         const winner = winners[i];
+//         const rank = i + 1;
+
+//         let prizeAmount = 0;
+//         let prizePercentage = 0;
+
+//         if (rewardType === 'monetary' && prizeDistArray.length > 0) {
+//           const distEntry = prizeDistArray.find(d => d.rank === rank);
+//           if (distEntry) {
+//             prizePercentage = distEntry.percentage;
+//             prizeAmount = (totalPrizePool * prizePercentage) / 100;
+//           } else {
+//             prizeAmount = totalPrizePool / winners.length;
+//             prizePercentage = 100 / winners.length;
+//           }
+//         }
+
+//         const winnerResult = await client.query(
+//           `INSERT INTO votteryy_lottery_winners
+//            (election_id, user_id, ticket_id, rank, prize_amount, prize_percentage, prize_description, prize_type, claimed, disbursement_status)
+//            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+//            RETURNING *`,
+//           [
+//             electionId,
+//             winner.user_id,
+//             winner.ticket_id,
+//             rank,
+//             prizeAmount,
+//             prizePercentage,
+//             election.lottery_prize_description,
+//             rewardType,
+//             false,
+//             'pending_claim'
+//           ]
+//         );
+
+//         winnerRecords.push(winnerResult.rows[0]);
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'LOTTERY_AUTO_DRAWN',
+//           'election',
+//           electionId,
+//           null,
+//           JSON.stringify({ draw_id: drawId, total_participants: totalParticipants, winner_count: winners.length })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       return { success: true, drawId, winners: winnerRecords };
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       throw error;
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ============================================
+//   // ADMIN: GET DISBURSEMENT CONFIG
+//   // ============================================
+//   async getDisbursementConfig(req, res) {
+//     try {
+//       const result = await pool.query(
+//         `SELECT id, config_key, config_value, description, updated_at, updated_by 
+//          FROM votteryy_disbursement_config 
+//          ORDER BY config_key`
+//       );
+
+//       const configWithAdminNames = await Promise.all(result.rows.map(async (row) => {
+//         let updatedByName = null;
+//         if (row.updated_by) {
+//           const adminResult = await pool.query(
+//             `SELECT first_name, last_name FROM votteryy_user_details WHERE user_id = $1`,
+//             [row.updated_by]
+//           );
+//           if (adminResult.rows.length > 0) {
+//             updatedByName = `${adminResult.rows[0].first_name || ''} ${adminResult.rows[0].last_name || ''}`.trim();
+//           }
+//         }
+//         return {
+//           ...row,
+//           config_value: row.config_key === 'CURRENCY' ? row.config_value : parseFloat(row.config_value),
+//           updated_by_name: updatedByName
+//         };
+//       }));
+
+//       const currentConfig = await getFreshConfig();
+
+//       res.json({ 
+//         success: true,
+//         config: configWithAdminNames,
+//         current: currentConfig,
+//         thresholds: {
+//           auto_disburse_threshold: currentConfig.AUTO_DISBURSE_THRESHOLD,
+//           large_amount_threshold: currentConfig.LARGE_AMOUNT_THRESHOLD,
+//           max_auto_disburse_daily: currentConfig.MAX_AUTO_DISBURSE_DAILY,
+//           currency: currentConfig.CURRENCY
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get config error:', error);
+//       res.status(500).json({ error: 'Failed to get configuration' });
+//     }
+//   }
+
+//   // ============================================
+//   // ADMIN: UPDATE DISBURSEMENT CONFIG (Single Key)
+//   // ============================================
+//   async updateDisbursementConfig(req, res) {
+//     try {
+//       const adminId = req.user.userId;
+//       const { config_key, config_value } = req.body;
+
+//       const validKeys = ['AUTO_DISBURSE_THRESHOLD', 'LARGE_AMOUNT_THRESHOLD', 'MAX_AUTO_DISBURSE_DAILY', 'CURRENCY'];
+//       if (!validKeys.includes(config_key)) {
+//         return res.status(400).json({ 
+//           error: 'Invalid config key',
+//           valid_keys: validKeys
+//         });
+//       }
+
+//       if (config_key !== 'CURRENCY') {
+//         const numValue = parseFloat(config_value);
+//         if (isNaN(numValue) || numValue < 0) {
+//           return res.status(400).json({ error: 'Config value must be a positive number' });
+//         }
+//       }
+
+//       if (config_key === 'AUTO_DISBURSE_THRESHOLD') {
+//         const largeThreshold = DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD;
+//         if (parseFloat(config_value) >= largeThreshold) {
+//           return res.status(400).json({ 
+//             error: `Auto disburse threshold must be less than large amount threshold ($${largeThreshold})`
+//           });
+//         }
+//       }
+
+//       if (config_key === 'LARGE_AMOUNT_THRESHOLD') {
+//         const autoThreshold = DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD;
+//         if (parseFloat(config_value) <= autoThreshold) {
+//           return res.status(400).json({ 
+//             error: `Large amount threshold must be greater than auto disburse threshold ($${autoThreshold})`
+//           });
+//         }
+//       }
+
+//       await pool.query(
+//         `INSERT INTO votteryy_disbursement_config (config_key, config_value, updated_at, updated_by)
+//          VALUES ($1, $2, CURRENT_TIMESTAMP, $3)
+//          ON CONFLICT (config_key) 
+//          DO UPDATE SET 
+//            config_value = $2, 
+//            updated_at = CURRENT_TIMESTAMP, 
+//            updated_by = $3`,
+//         [config_key, config_value.toString(), adminId]
+//       );
+
+//       if (config_key === 'CURRENCY') {
+//         DISBURSEMENT_CONFIG[config_key] = config_value;
+//       } else {
+//         DISBURSEMENT_CONFIG[config_key] = parseFloat(config_value);
+//       }
+
+//       await pool.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'DISBURSEMENT_CONFIG_UPDATED',
+//           'system_config',
+//           config_key,
+//           adminId,
+//           JSON.stringify({ 
+//             config_key, 
+//             new_value: config_value,
+//             updated_by: adminId 
+//           })
+//         ]
+//       );
+
+//       res.json({ 
+//         success: true, 
+//         message: `Configuration "${config_key}" updated successfully`,
+//         config_key,
+//         config_value: config_key === 'CURRENCY' ? config_value : parseFloat(config_value),
+//         current: DISBURSEMENT_CONFIG 
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Update config error:', error);
+//       res.status(500).json({ error: 'Failed to update configuration' });
+//     }
+//   }
+
+//   // ============================================
+//   // ADMIN: BULK UPDATE DISBURSEMENT CONFIG
+//   // ============================================
+//   async bulkUpdateDisbursementConfig(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const adminId = req.user.userId;
+//       const { configs } = req.body;
+
+//       if (!configs || typeof configs !== 'object') {
+//         return res.status(400).json({ error: 'Invalid configs object' });
+//       }
+
+//       const validKeys = ['AUTO_DISBURSE_THRESHOLD', 'LARGE_AMOUNT_THRESHOLD', 'MAX_AUTO_DISBURSE_DAILY', 'CURRENCY'];
+//       const updates = [];
+//       const errors = [];
+
+//       for (const [key, value] of Object.entries(configs)) {
+//         if (!validKeys.includes(key)) {
+//           errors.push({ key, error: 'Invalid config key' });
+//           continue;
+//         }
+
+//         if (key !== 'CURRENCY') {
+//           const numValue = parseFloat(value);
+//           if (isNaN(numValue) || numValue < 0) {
+//             errors.push({ key, error: 'Must be a positive number' });
+//             continue;
+//           }
+//         }
+
+//         updates.push({ key, value: value.toString() });
+//       }
+
+//       const autoThreshold = configs.AUTO_DISBURSE_THRESHOLD !== undefined 
+//         ? parseFloat(configs.AUTO_DISBURSE_THRESHOLD) 
+//         : DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD;
+      
+//       const largeThreshold = configs.LARGE_AMOUNT_THRESHOLD !== undefined 
+//         ? parseFloat(configs.LARGE_AMOUNT_THRESHOLD) 
+//         : DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD;
+
+//       if (autoThreshold >= largeThreshold) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: 'Auto disburse threshold must be less than large amount threshold',
+//           auto_threshold: autoThreshold,
+//           large_threshold: largeThreshold
+//         });
+//       }
+
+//       if (errors.length > 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ error: 'Validation errors', details: errors });
+//       }
+
+//       for (const { key, value } of updates) {
+//         await client.query(
+//           `INSERT INTO votteryy_disbursement_config (config_key, config_value, updated_at, updated_by)
+//            VALUES ($1, $2, CURRENT_TIMESTAMP, $3)
+//            ON CONFLICT (config_key) 
+//            DO UPDATE SET 
+//              config_value = $2, 
+//              updated_at = CURRENT_TIMESTAMP, 
+//              updated_by = $3`,
+//           [key, value, adminId]
+//         );
+
+//         if (key === 'CURRENCY') {
+//           DISBURSEMENT_CONFIG[key] = value;
+//         } else {
+//           DISBURSEMENT_CONFIG[key] = parseFloat(value);
+//         }
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'DISBURSEMENT_CONFIG_BULK_UPDATED',
+//           'system_config',
+//           null,
+//           adminId,
+//           JSON.stringify({ updates: configs, updated_by: adminId })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       res.json({ 
+//         success: true, 
+//         message: `Updated ${updates.length} configuration(s)`,
+//         updated: updates.map(u => u.key),
+//         current: DISBURSEMENT_CONFIG 
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Bulk update config error:', error);
+//       res.status(500).json({ error: 'Failed to update configurations' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+// }
+
+// export default new LotteryController();
+// import pool from '../config/database.js';
+// import rngService from '../services/rng.service.js';
+// import auditService from '../services/audit.service.js';
+// import notificationService from '../services/notification.service.js';
+
+// // =====================================================
+// // DISBURSEMENT CONFIGURATION
+// // Priority: Database > ENV > Hardcoded defaults
+// // =====================================================
+// const DISBURSEMENT_CONFIG = {
+//   // Use your existing ENV as defaults, fallback to hardcoded
+//   AUTO_DISBURSE_THRESHOLD: parseFloat(process.env.WALLET_AUTO_PAYOUT_THRESHOLD) || 1000,
+//   LARGE_AMOUNT_THRESHOLD: parseFloat(process.env.WALLET_LARGE_PAYOUT_THRESHOLD) || 10000,
+//   MAX_AUTO_DISBURSE_DAILY: parseFloat(process.env.WALLET_MAX_AUTO_DAILY) || 50000,
+//   CURRENCY: process.env.WALLET_CURRENCY || 'USD',
+// };
+
+// async function loadDisbursementConfig() {
+//   try {
+//     const result = await pool.query(
+//       `SELECT config_key, config_value FROM votteryy_disbursement_config`
+//     );
+//     // Database values override ENV values
+//     result.rows.forEach(row => {
+//       if (DISBURSEMENT_CONFIG.hasOwnProperty(row.config_key)) {
+//         DISBURSEMENT_CONFIG[row.config_key] = parseFloat(row.config_value);
+//       }
+//     });
+//     console.log('✅ Disbursement config loaded:', DISBURSEMENT_CONFIG);
+//   } catch (error) {
+//     console.log('⚠️ Using ENV/default disbursement config:', DISBURSEMENT_CONFIG);
+//   }
+// }
+// loadDisbursementConfig();
+
+// class LotteryController {
+
+//   _maskWinnerName(firstName, lastName, odayuserId) {
+//     if (!firstName && !lastName) {
+//       return `Winner #${odayuserId}`;
+//     }
+//     const first = firstName ? `${firstName.charAt(0)}***` : '';
+//     const last = lastName ? `${lastName.charAt(0)}***` : '';
+//     return `${first} ${last}`.trim() || `Winner #${odayuserId}`;
+//   }
+
+//   // GET LOTTERY INFO
+// async getLotteryInfo(req, res) {
+//   try {
+//     const { electionId } = req.params;
+//     const userId = req.user?.userId;
+
+//     console.log(`🎰 Getting lottery info for election ${electionId}`);
+
+//     const result = await pool.query(
+//       `SELECT 
+//          e.id, e.title, e.lottery_enabled, e.lottery_prize_funding_source,
+//          e.lottery_reward_type, e.lottery_total_prize_pool, e.lottery_prize_description,
+//          e.lottery_estimated_value, e.lottery_projected_revenue,
+//          e.lottery_revenue_share_percentage, e.lottery_winner_count,
+//          e.lottery_prize_distribution, e.end_date, e.end_time, e.status
+//        FROM votteryyy_elections e WHERE e.id = $1`,
+//       [electionId]
+//     );
+
+//     if (result.rows.length === 0) {
+//       return res.status(404).json({ error: 'Election not found' });
+//     }
+
+//     const election = result.rows[0];
+
+//     if (!election.lottery_enabled) {
+//       return res.json({ lotteryEnabled: false, lottery_enabled: false });
+//     }
+
+//     // Get participant count
+//     const participantResult = await pool.query(
+//       `SELECT COUNT(*) as count FROM votteryy_lottery_tickets WHERE election_id = $1`,
+//       [electionId]
+//     );
+//     const participantCount = parseInt(participantResult.rows[0].count || 0);
+
+//     // Check for draw record
+//     const drawResult = await pool.query(
+//       `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1 ORDER BY draw_time DESC LIMIT 1`,
+//       [electionId]
+//     );
+//     const drawInfo = drawResult.rows.length > 0 ? drawResult.rows[0] : null;
+
+//     // ✅ KEY FIX: Also check if winners exist directly (even without draw record)
+//     const winnersCheckResult = await pool.query(
+//       `SELECT COUNT(*) as count FROM votteryy_lottery_winners WHERE election_id = $1`,
+//       [electionId]
+//     );
+//     const winnersExist = parseInt(winnersCheckResult.rows[0].count || 0) > 0;
+
+//     // ✅ hasBeenDrawn is TRUE if EITHER:
+//     // 1. A draw record exists in lottery_draws table, OR
+//     // 2. Winners exist in lottery_winners table (fallback check)
+//     const hasBeenDrawn = drawResult.rows.length > 0 || winnersExist;
+
+//     console.log(`🎰 Election ${electionId} draw detection:`, {
+//       drawRecordExists: drawResult.rows.length > 0,
+//       winnersExist,
+//       hasBeenDrawn,
+//     });
+
+//     let winners = [];
+//     let currentUserWinner = null;
+
+//     // If hasBeenDrawn (by either check), fetch winners
+//     if (hasBeenDrawn) {
+//       const winnersResult = await pool.query(
+//         `SELECT 
+//            lw.winner_id, lw.user_id, lw.rank, lw.prize_amount, lw.prize_percentage,
+//            lw.prize_description, lw.prize_type, lw.claimed, lw.claimed_at,
+//            lw.disbursement_status, lw.disbursed_at, lw.admin_approved_by,
+//            lw.admin_approved_at, lw.rejection_reason, lt.ball_number,
+//            lt.ticket_number, ud.first_name, ud.last_name
+//          FROM votteryy_lottery_winners lw
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          WHERE lw.election_id = $1 ORDER BY lw.rank ASC`,
+//         [electionId]
+//       );
+
+//       console.log(`🏆 Found ${winnersResult.rows.length} winners for election ${electionId}`);
+
+//       winners = winnersResult.rows.map(w => {
+//         const fullName = `${w.first_name || ''} ${w.last_name || ''}`.trim();
+//         const winnerData = {
+//           id: w.winner_id,
+//           winner_id: w.winner_id,
+//           user_id: w.user_id,
+//           rank: w.rank,
+//           prize_amount: parseFloat(w.prize_amount || 0),
+//           prize_percentage: parseFloat(w.prize_percentage || 0),
+//           prize_description: w.prize_description,
+//           prize_type: w.prize_type,
+//           claimed: w.claimed,
+//           claimed_at: w.claimed_at,
+//           disbursement_status: w.disbursement_status || 'pending_claim',
+//           disbursed_at: w.disbursed_at,
+//           ball_number: w.ball_number,
+//           ticket_number: w.ticket_number,
+//           winner_name: fullName || `Winner #${w.rank}`,
+//           display_name: this._maskWinnerName(w.first_name, w.last_name, w.user_id),
+//         };
+
+//         if (userId && w.user_id === String(userId)) {
+//           currentUserWinner = {
+//             ...winnerData,
+//             winner_name: fullName || `User #${w.user_id}`,
+//             display_name: fullName || `User #${w.user_id}`,
+//             isCurrentUser: true,
+//             can_claim: !w.claimed && (!w.disbursement_status || w.disbursement_status === 'pending_claim'),
+//           };
+//         }
+
+//         return winnerData;
+//       });
+//     }
+
+//     const response = {
+//       lotteryEnabled: true,
+//       lottery_enabled: true,
+//       hasBeenDrawn,
+//       has_been_drawn: hasBeenDrawn,
+//       drawTime: drawInfo?.draw_time,
+//       draw_time: drawInfo?.draw_time,
+//       electionTitle: election.title,
+//       election_title: election.title,
+//       rewardType: election.lottery_reward_type,
+//       reward_type: election.lottery_reward_type,
+//       totalPrizePool: parseFloat(election.lottery_total_prize_pool || 0),
+//       total_prize_pool: parseFloat(election.lottery_total_prize_pool || 0),
+//       prizeDescription: election.lottery_prize_description,
+//       prize_description: election.lottery_prize_description,
+//       estimatedValue: parseFloat(election.lottery_estimated_value || 0),
+//       estimated_value: parseFloat(election.lottery_estimated_value || 0),
+//       winnerCount: winners.length > 0 ? winners.length : election.lottery_winner_count,
+//       winner_count: winners.length > 0 ? winners.length : election.lottery_winner_count,
+//       prizeDistribution: election.lottery_prize_distribution || [],
+//       prize_distribution: election.lottery_prize_distribution || [],
+//       participantCount,
+//       participant_count: participantCount,
+//       winners,
+//       currentUserWinner,
+//       current_user_winner: currentUserWinner,
+//     };
+
+//     console.log(`📊 Returning lottery info:`, {
+//       electionId,
+//       hasBeenDrawn: response.hasBeenDrawn,
+//       winnersCount: response.winners.length,
+//     });
+
+//     res.json(response);
+
+//   } catch (error) {
+//     console.error('❌ Get lottery info error:', error);
+//     res.status(500).json({ error: 'Failed to retrieve lottery information' });
+//   }
+// }
+
+
+//   // GET PUBLIC WINNERS ANNOUNCEMENT
+//   async getWinnersAnnouncement(req, res) {
+//     try {
+//       const { electionId } = req.params;
+
+//       const electionResult = await pool.query(
+//         `SELECT id, title, lottery_enabled, lottery_reward_type,
+//                 lottery_total_prize_pool, lottery_prize_description
+//          FROM votteryyy_elections WHERE id = $1`,
+//         [electionId]
+//       );
+
+//       if (electionResult.rows.length === 0) {
+//         return res.status(404).json({ error: 'Election not found' });
+//       }
+
+//       const election = electionResult.rows[0];
+
+//       if (!election.lottery_enabled) {
+//         return res.status(400).json({ error: 'Lottery not enabled for this election' });
+//       }
+
+//       const drawResult = await pool.query(
+//         `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+//         [electionId]
+//       );
+
+//       if (drawResult.rows.length === 0) {
+//         return res.json({
+//           announced: false,
+//           message: 'Lottery has not been drawn yet',
+//           electionTitle: election.title,
+//         });
+//       }
+
+//       const draw = drawResult.rows[0];
+
+//       const winnersResult = await pool.query(
+//         `SELECT 
+//            lw.winner_id, lw.rank, lw.prize_amount, lw.prize_percentage,
+//            lw.prize_description, lw.prize_type, lw.claimed, lw.disbursement_status,
+//            lt.ball_number, ud.first_name, ud.last_name
+//          FROM votteryy_lottery_winners lw
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          WHERE lw.election_id = $1 ORDER BY lw.rank ASC`,
+//         [electionId]
+//       );
+
+//       // ✅ FIX: Inline the mask logic instead of using this._maskWinnerName
+//       // This fixes the "Cannot read properties of undefined" error
+//       const winners = winnersResult.rows.map(w => {
+//         // Inline mask logic (replaces this._maskWinnerName call)
+//         let displayName;
+//         if (!w.first_name && !w.last_name) {
+//           displayName = `Winner #${w.winner_id}`;
+//         } else {
+//           const first = w.first_name ? `${w.first_name.charAt(0)}***` : '';
+//           const last = w.last_name ? `${w.last_name.charAt(0)}***` : '';
+//           displayName = `${first} ${last}`.trim() || `Winner #${w.winner_id}`;
+//         }
+
+//         return {
+//           rank: w.rank,
+//           prize_amount: parseFloat(w.prize_amount || 0),
+//           prize_percentage: parseFloat(w.prize_percentage || 0),
+//           prize_description: w.prize_description,
+//           prize_type: w.prize_type,
+//           ball_number: w.ball_number,
+//           display_name: displayName,
+//           claimed: w.claimed,
+//           disbursement_status: w.disbursement_status || 'pending_claim',
+//         };
+//       });
+
+//       res.json({
+//         announced: true,
+//         electionId: election.id,
+//         electionTitle: election.title,
+//         drawTime: draw.draw_time,
+//         totalParticipants: draw.total_participants,
+//         totalPrizePool: parseFloat(election.lottery_total_prize_pool || 0),
+//         rewardType: election.lottery_reward_type,
+//         prizeDescription: election.lottery_prize_description,
+//         winners,
+//         randomSeed: draw.random_seed,
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get winners announcement error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve winners announcement' });
+//     }
+//   }
+
+//   // ============================================
+//   // CLAIM LOTTERY PRIZE (Main Feature)
+//   // ============================================
+//   async claimPrize(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerId } = req.params;
+//       const userId = req.user.userId;
+
+//       console.log(`🎁 Claim prize request: winnerId=${winnerId}, userId=${userId}`);
+
+//       const winnerResult = await client.query(
+//         `SELECT lw.*, e.title as election_title, e.lottery_reward_type
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          WHERE lw.winner_id = $1`,
+//         [winnerId]
+//       );
+
+//       if (winnerResult.rows.length === 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(404).json({ error: 'Winner record not found' });
+//       }
+
+//       const winner = winnerResult.rows[0];
+
+//       if (winner.user_id !== String(userId)) {
+//         await client.query('ROLLBACK');
+//         return res.status(403).json({ error: 'You are not authorized to claim this prize' });
+//       }
+
+//       if (winner.claimed) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: 'Prize already claimed',
+//           disbursement_status: winner.disbursement_status 
+//         });
+//       }
+
+//       const prizeAmount = parseFloat(winner.prize_amount || 0);
+//       const rewardType = winner.lottery_reward_type || winner.prize_type;
+//       let disbursementStatus = 'pending_claim';
+//       let requiresApproval = false;
+//       let autoDisbursed = false;
+
+//       if (rewardType === 'monetary' && prizeAmount > 0) {
+//         if (prizeAmount >= DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD) {
+//           disbursementStatus = 'pending_senior_approval';
+//           requiresApproval = true;
+//           console.log(`💰 Large amount ($${prizeAmount}) - requires senior approval`);
+//         } else if (prizeAmount >= DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD) {
+//           disbursementStatus = 'pending_approval';
+//           requiresApproval = true;
+//           console.log(`💰 Medium amount ($${prizeAmount}) - requires admin approval`);
+//         } else {
+//           disbursementStatus = 'disbursed';
+//           autoDisbursed = true;
+//           console.log(`💰 Small amount ($${prizeAmount}) - auto disbursing`);
+          
+//           await client.query(
+//             `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
+//              VALUES ($1, $2, 0, '${DISBURSEMENT_CONFIG.CURRENCY}')
+//              ON CONFLICT (user_id)
+//              DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
+//             [userId, prizeAmount]
+//           );
+
+//           await client.query(
+//             `INSERT INTO votteryy_wallet_transactions
+//              (user_id, transaction_type, amount, election_id, status, description, metadata)
+//              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+//             [
+//               userId,
+//               'prize_won',
+//               prizeAmount,
+//               winner.election_id,
+//               'success',
+//               `Lottery Prize Rank #${winner.rank} - ${winner.election_title}`,
+//               JSON.stringify({ winner_id: winnerId, auto_disbursed: true })
+//             ]
+//           );
+//         }
+//       } else if (rewardType === 'non_monetary' || rewardType === 'projected_revenue') {
+//         disbursementStatus = 'pending_approval';
+//         requiresApproval = true;
+//       }
+
+//       await client.query(
+//         `UPDATE votteryy_lottery_winners
+//          SET claimed = true, claimed_at = CURRENT_TIMESTAMP,
+//              disbursement_status = $2,
+//              disbursed_at = CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE NULL END
+//          WHERE winner_id = $1`,
+//         [winnerId, disbursementStatus, autoDisbursed]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'PRIZE_CLAIMED',
+//           'lottery_winner',
+//           winnerId,
+//           userId,
+//           JSON.stringify({
+//             prize_amount: prizeAmount,
+//             reward_type: rewardType,
+//             disbursement_status: disbursementStatus,
+//             requires_approval: requiresApproval,
+//             auto_disbursed: autoDisbursed
+//           })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       let newBalance = null;
+//       if (autoDisbursed) {
+//         const walletResult = await pool.query(
+//           `SELECT balance FROM votteryy_user_wallets WHERE user_id = $1`,
+//           [userId]
+//         );
+//         newBalance = walletResult.rows[0]?.balance;
+//       }
+
+//       res.json({
+//         success: true,
+//         message: requiresApproval 
+//           ? 'Prize claimed successfully. Awaiting admin approval for disbursement.'
+//           : 'Prize claimed and disbursed to your wallet!',
+//         winner_id: winnerId,
+//         prize_amount: prizeAmount,
+//         disbursement_status: disbursementStatus,
+//         requires_approval: requiresApproval,
+//         auto_disbursed: autoDisbursed,
+//         new_balance: newBalance,
+//         thresholds: {
+//           auto_threshold: DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD,
+//           large_threshold: DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD,
+//         }
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Claim prize error:', error);
+//       res.status(500).json({ error: 'Failed to claim prize' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // GET USER'S WINNING HISTORY
+//   async getUserWinningHistory(req, res) {
+//     try {
+//       const userId = req.user.userId;
+
+//       const result = await pool.query(
+//         `SELECT lw.*, e.title as election_title, e.lottery_reward_type,
+//                 lt.ticket_number, lt.ball_number
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          WHERE lw.user_id = $1 ORDER BY lw.created_at DESC`,
+//         [userId]
+//       );
+
+//       const winnings = result.rows.map(row => ({
+//         winner_id: row.winner_id,
+//         election_id: row.election_id,
+//         election_title: row.election_title,
+//         rank: row.rank,
+//         prize_amount: parseFloat(row.prize_amount || 0),
+//         prize_type: row.prize_type || row.lottery_reward_type,
+//         prize_description: row.prize_description,
+//         ticket_number: row.ticket_number,
+//         ball_number: row.ball_number,
+//         claimed: row.claimed,
+//         claimed_at: row.claimed_at,
+//         disbursement_status: row.disbursement_status || 'pending_claim',
+//         disbursed_at: row.disbursed_at,
+//         rejection_reason: row.rejection_reason,
+//         can_claim: !row.claimed,
+//         created_at: row.created_at,
+//       }));
+
+//       const summary = {
+//         total_wins: winnings.length,
+//         total_won: winnings.reduce((sum, w) => sum + w.prize_amount, 0),
+//         claimed: winnings.filter(w => w.claimed).length,
+//         disbursed: winnings.filter(w => w.disbursement_status === 'disbursed').length,
+//         pending: winnings.filter(w => ['pending_approval', 'pending_senior_approval'].includes(w.disbursement_status)).length,
+//         unclaimed: winnings.filter(w => !w.claimed).length,
+//         rejected: winnings.filter(w => w.disbursement_status === 'rejected').length,
+//       };
+
+//       res.json({ winnings, summary });
+
+//     } catch (error) {
+//       console.error('❌ Get user winning history error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve winning history' });
+//     }
+//   }
+
+//   // ADMIN: GET PENDING APPROVALS
+//   async getPendingApprovals(req, res) {
+//     try {
+//       const { status, minAmount, maxAmount } = req.query;
+
+//       let whereClause = `WHERE lw.disbursement_status IN ('pending_approval', 'pending_senior_approval')`;
+//       const params = [];
+//       let paramIndex = 1;
+
+//       if (status) {
+//         whereClause = `WHERE lw.disbursement_status = $${paramIndex}`;
+//         params.push(status);
+//         paramIndex++;
+//       }
+
+//       if (minAmount) {
+//         whereClause += ` AND lw.prize_amount >= $${paramIndex}`;
+//         params.push(parseFloat(minAmount));
+//         paramIndex++;
+//       }
+
+//       if (maxAmount) {
+//         whereClause += ` AND lw.prize_amount <= $${paramIndex}`;
+//         params.push(parseFloat(maxAmount));
+//         paramIndex++;
+//       }
+
+//       const result = await pool.query(
+//         `SELECT lw.*, e.title as election_title, ud.first_name, ud.last_name,
+//                 CONCAT(COALESCE(ud.first_name, ''), ' ', COALESCE(ud.last_name, '')) as winner_full_name,
+//                 lt.ticket_number, lt.ball_number, uw.balance as user_balance
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_lottery_tickets lt ON lw.ticket_id = lt.ticket_id
+//          LEFT JOIN votteryy_user_wallets uw ON lw.user_id = uw.user_id
+//          ${whereClause}
+//          ORDER BY lw.prize_amount DESC, lw.claimed_at ASC`,
+//         params
+//       );
+
+//       const pendingApprovals = result.rows.map(row => ({
+//         winner_id: row.winner_id,
+//         election_id: row.election_id,
+//         election_title: row.election_title,
+//         user_id: row.user_id,
+//         winner_name: row.winner_full_name?.trim() || `User #${row.user_id}`,
+//         first_name: row.first_name,
+//         last_name: row.last_name,
+//         rank: row.rank,
+//         prize_amount: parseFloat(row.prize_amount || 0),
+//         prize_type: row.prize_type,
+//         prize_description: row.prize_description,
+//         ticket_number: row.ticket_number,
+//         ball_number: row.ball_number,
+//         claimed_at: row.claimed_at,
+//         disbursement_status: row.disbursement_status,
+//         requires_senior_approval: row.disbursement_status === 'pending_senior_approval',
+//         user_current_balance: parseFloat(row.user_balance || 0),
+//       }));
+
+//       const stats = {
+//         total_pending: pendingApprovals.length,
+//         total_amount: pendingApprovals.reduce((sum, p) => sum + p.prize_amount, 0),
+//         pending_approval: pendingApprovals.filter(p => p.disbursement_status === 'pending_approval').length,
+//         pending_senior_approval: pendingApprovals.filter(p => p.disbursement_status === 'pending_senior_approval').length,
+//       };
+
+//       res.json({
+//         pendingApprovals,
+//         pending_approvals: pendingApprovals,
+//         stats,
+//         thresholds: {
+//           auto_disburse: DISBURSEMENT_CONFIG.AUTO_DISBURSE_THRESHOLD,
+//           large_amount: DISBURSEMENT_CONFIG.LARGE_AMOUNT_THRESHOLD,
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get pending approvals error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve pending approvals' });
+//     }
+//   }
+
+//   // ADMIN: APPROVE DISBURSEMENT
+//   async approveDisbursement(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerId } = req.params;
+//       const adminId = req.user.userId;
+//       const adminRoles = req.user.roles || [];
+//       const { notes } = req.body;
+
+//       console.log(`✅ Approve disbursement: winnerId=${winnerId}, adminId=${adminId}`);
+
+//       const winnerResult = await client.query(
+//         `SELECT lw.*, e.title as election_title
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          WHERE lw.winner_id = $1`,
+//         [winnerId]
+//       );
+
+//       if (winnerResult.rows.length === 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(404).json({ error: 'Winner record not found' });
+//       }
+
+//       const winner = winnerResult.rows[0];
+//       const prizeAmount = parseFloat(winner.prize_amount || 0);
+
+//       if (winner.disbursement_status === 'pending_senior_approval') {
+//         if (!adminRoles.includes('manager')) {
+//           await client.query('ROLLBACK');
+//           return res.status(403).json({ 
+//             error: 'This disbursement requires Manager approval due to large amount',
+//             required_role: 'manager',
+//             prize_amount: prizeAmount
+//           });
+//         }
+//       }
+
+//       if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: `Cannot approve disbursement with status: ${winner.disbursement_status}` 
+//         });
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
+//          VALUES ($1, $2, 0, '${DISBURSEMENT_CONFIG.CURRENCY}')
+//          ON CONFLICT (user_id)
+//          DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
+//         [winner.user_id, prizeAmount]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_wallet_transactions
+//          (user_id, transaction_type, amount, election_id, status, description, metadata)
+//          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+//         [
+//           winner.user_id,
+//           'prize_won',
+//           prizeAmount,
+//           winner.election_id,
+//           'success',
+//           `Lottery Prize Rank #${winner.rank} - ${winner.election_title} (Admin Approved)`,
+//           JSON.stringify({ winner_id: winnerId, approved_by: adminId, notes })
+//         ]
+//       );
+
+//       await client.query(
+//         `UPDATE votteryy_lottery_winners
+//          SET disbursement_status = 'disbursed', disbursed_at = CURRENT_TIMESTAMP,
+//              admin_approved_by = $2, admin_approved_at = CURRENT_TIMESTAMP, admin_notes = $3
+//          WHERE winner_id = $1`,
+//         [winnerId, adminId, notes]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'PRIZE_DISBURSEMENT_APPROVED',
+//           'lottery_winner',
+//           winnerId,
+//           adminId,
+//           JSON.stringify({
+//             winner_user_id: winner.user_id,
+//             prize_amount: prizeAmount,
+//             election_id: winner.election_id,
+//             notes
+//           })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       const walletResult = await pool.query(
+//         `SELECT balance FROM votteryy_user_wallets WHERE user_id = $1`,
+//         [winner.user_id]
+//       );
+
+//       res.json({
+//         success: true,
+//         message: 'Prize disbursement approved and funds transferred to winner wallet',
+//         winner_id: winnerId,
+//         user_id: winner.user_id,
+//         prize_amount: prizeAmount,
+//         disbursement_status: 'disbursed',
+//         approved_by: adminId,
+//         approved_at: new Date().toISOString(),
+//         new_balance: parseFloat(walletResult.rows[0]?.balance || 0),
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Approve disbursement error:', error);
+//       res.status(500).json({ error: 'Failed to approve disbursement' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ADMIN: REJECT DISBURSEMENT
+//   async rejectDisbursement(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerId } = req.params;
+//       const adminId = req.user.userId;
+//       const { reason } = req.body;
+
+//       if (!reason || !reason.trim()) {
+//         return res.status(400).json({ error: 'Rejection reason is required' });
+//       }
+
+//       const winnerResult = await client.query(
+//         `SELECT * FROM votteryy_lottery_winners WHERE winner_id = $1`,
+//         [winnerId]
+//       );
+
+//       if (winnerResult.rows.length === 0) {
+//         await client.query('ROLLBACK');
+//         return res.status(404).json({ error: 'Winner record not found' });
+//       }
+
+//       const winner = winnerResult.rows[0];
+
+//       if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
+//         await client.query('ROLLBACK');
+//         return res.status(400).json({ 
+//           error: `Cannot reject disbursement with status: ${winner.disbursement_status}` 
+//         });
+//       }
+
+//       await client.query(
+//         `UPDATE votteryy_lottery_winners
+//          SET disbursement_status = 'rejected', rejection_reason = $2,
+//              admin_approved_by = $3, admin_approved_at = CURRENT_TIMESTAMP
+//          WHERE winner_id = $1`,
+//         [winnerId, reason, adminId]
+//       );
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'PRIZE_DISBURSEMENT_REJECTED',
+//           'lottery_winner',
+//           winnerId,
+//           adminId,
+//           JSON.stringify({
+//             winner_user_id: winner.user_id,
+//             prize_amount: winner.prize_amount,
+//             reason
+//           })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       res.json({
+//         success: true,
+//         message: 'Prize disbursement rejected',
+//         winner_id: winnerId,
+//         disbursement_status: 'rejected',
+//         rejection_reason: reason,
+//         rejected_by: adminId,
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Reject disbursement error:', error);
+//       res.status(500).json({ error: 'Failed to reject disbursement' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ADMIN: BULK APPROVE DISBURSEMENTS
+//   async bulkApproveDisbursements(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { winnerIds } = req.body;
+//       const adminId = req.user.userId;
+//       const adminRoles = req.user.roles || [];
+
+//       if (!Array.isArray(winnerIds) || winnerIds.length === 0) {
+//         return res.status(400).json({ error: 'Winner IDs array is required' });
+//       }
+
+//       const results = { approved: [], failed: [], skipped: [] };
+
+//       for (const winnerId of winnerIds) {
+//         try {
+//           const winnerResult = await client.query(
+//             `SELECT lw.*, e.title as election_title
+//              FROM votteryy_lottery_winners lw
+//              JOIN votteryyy_elections e ON lw.election_id = e.id
+//              WHERE lw.winner_id = $1`,
+//             [winnerId]
+//           );
+
+//           if (winnerResult.rows.length === 0) {
+//             results.failed.push({ winner_id: winnerId, reason: 'Not found' });
+//             continue;
+//           }
+
+//           const winner = winnerResult.rows[0];
+//           const prizeAmount = parseFloat(winner.prize_amount || 0);
+
+//           if (winner.disbursement_status === 'pending_senior_approval' && !adminRoles.includes('manager')) {
+//             results.skipped.push({ winner_id: winnerId, reason: 'Requires manager approval', prize_amount: prizeAmount });
+//             continue;
+//           }
+
+//           if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
+//             results.skipped.push({ winner_id: winnerId, reason: `Invalid status: ${winner.disbursement_status}` });
+//             continue;
+//           }
+
+//           await client.query(
+//             `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
+//              VALUES ($1, $2, 0, '${DISBURSEMENT_CONFIG.CURRENCY}')
+//              ON CONFLICT (user_id)
+//              DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
+//             [winner.user_id, prizeAmount]
+//           );
+
+//           await client.query(
+//             `INSERT INTO votteryy_wallet_transactions
+//              (user_id, transaction_type, amount, election_id, status, description, metadata)
+//              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+//             [
+//               winner.user_id,
+//               'prize_won',
+//               prizeAmount,
+//               winner.election_id,
+//               'success',
+//               `Lottery Prize Rank #${winner.rank} - ${winner.election_title} (Bulk Approved)`,
+//               JSON.stringify({ winner_id: winnerId, approved_by: adminId, bulk: true })
+//             ]
+//           );
+
+//           await client.query(
+//             `UPDATE votteryy_lottery_winners
+//              SET disbursement_status = 'disbursed', disbursed_at = CURRENT_TIMESTAMP,
+//                  admin_approved_by = $2, admin_approved_at = CURRENT_TIMESTAMP, admin_notes = 'Bulk approved'
+//              WHERE winner_id = $1`,
+//             [winnerId, adminId]
+//           );
+
+//           results.approved.push({ winner_id: winnerId, user_id: winner.user_id, prize_amount: prizeAmount });
+
+//         } catch (innerError) {
+//           results.failed.push({ winner_id: winnerId, reason: innerError.message });
+//         }
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         ['BULK_PRIZE_DISBURSEMENT', 'lottery_winners', null, adminId, JSON.stringify(results)]
+//       );
+
+//       await client.query('COMMIT');
+
+//       const totalDisbursed = results.approved.reduce((sum, a) => sum + a.prize_amount, 0);
+
+//       res.json({
+//         success: true,
+//         message: `Processed ${winnerIds.length} disbursements`,
+//         results,
+//         summary: {
+//           total: winnerIds.length,
+//           approved: results.approved.length,
+//           failed: results.failed.length,
+//           skipped: results.skipped.length,
+//           total_amount_disbursed: totalDisbursed,
+//         }
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Bulk approve error:', error);
+//       res.status(500).json({ error: 'Failed to process bulk approvals' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+//   // ADMIN: GET DISBURSEMENT HISTORY
+//   async getDisbursementHistory(req, res) {
+//     try {
+//       const { electionId, status, fromDate, toDate, page = 1, limit = 20 } = req.query;
+//       const offset = (parseInt(page) - 1) * parseInt(limit);
+
+//       let whereClause = 'WHERE lw.claimed = true';
+//       const params = [];
+//       let paramIndex = 1;
+
+//       if (electionId) {
+//         whereClause += ` AND lw.election_id = $${paramIndex}`;
+//         params.push(electionId);
+//         paramIndex++;
+//       }
+
+//       if (status) {
+//         whereClause += ` AND lw.disbursement_status = $${paramIndex}`;
+//         params.push(status);
+//         paramIndex++;
+//       }
+
+//       if (fromDate) {
+//         whereClause += ` AND lw.claimed_at >= $${paramIndex}`;
+//         params.push(fromDate);
+//         paramIndex++;
+//       }
+
+//       if (toDate) {
+//         whereClause += ` AND lw.claimed_at <= $${paramIndex}`;
+//         params.push(toDate);
+//         paramIndex++;
+//       }
+
+//       const countResult = await pool.query(
+//         `SELECT COUNT(*) as total FROM votteryy_lottery_winners lw ${whereClause}`,
+//         params
+//       );
+//       const total = parseInt(countResult.rows[0].total);
+
+//       params.push(parseInt(limit), offset);
+//       const result = await pool.query(
+//         `SELECT lw.*, e.title as election_title, ud.first_name, ud.last_name,
+//                 CONCAT(COALESCE(ud.first_name, ''), ' ', COALESCE(ud.last_name, '')) as winner_full_name,
+//                 admin_ud.first_name as admin_first_name, admin_ud.last_name as admin_last_name
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          LEFT JOIN votteryy_user_details ud ON lw.user_id::integer = ud.user_id
+//          LEFT JOIN votteryy_user_details admin_ud ON lw.admin_approved_by::integer = admin_ud.user_id
+//          ${whereClause}
+//          ORDER BY lw.claimed_at DESC
+//          LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
+//         params
+//       );
+
+//       const disbursements = result.rows.map(row => ({
+//         winner_id: row.winner_id,
+//         election_id: row.election_id,
+//         election_title: row.election_title,
+//         user_id: row.user_id,
+//         winner_name: row.winner_full_name?.trim() || `User #${row.user_id}`,
+//         rank: row.rank,
+//         prize_amount: parseFloat(row.prize_amount || 0),
+//         prize_type: row.prize_type,
+//         claimed: row.claimed,
+//         claimed_at: row.claimed_at,
+//         disbursement_status: row.disbursement_status || 'pending_claim',
+//         disbursed_at: row.disbursed_at,
+//         admin_approved_by: row.admin_approved_by,
+//         admin_name: row.admin_first_name ? `${row.admin_first_name} ${row.admin_last_name}` : null,
+//         admin_approved_at: row.admin_approved_at,
+//         rejection_reason: row.rejection_reason,
+//         admin_notes: row.admin_notes,
+//       }));
+
+//       res.json({
+//         disbursements,
+//         pagination: {
+//           page: parseInt(page),
+//           limit: parseInt(limit),
+//           total,
+//           totalPages: Math.ceil(total / parseInt(limit)),
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get disbursement history error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve disbursement history' });
+//     }
+//   }
+
+//   // GET USER'S LOTTERY TICKET
+//   async getUserTicket(req, res) {
+//     try {
+//       const { electionId } = req.params;
+//       const userId = req.user.userId;
+
+//       const result = await pool.query(
+//         `SELECT * FROM votteryy_lottery_tickets WHERE user_id = $1 AND election_id = $2`,
+//         [userId, electionId]
+//       );
+
+//       if (result.rows.length === 0) {
+//         return res.json({
+//           hasTicket: false,
+//           has_ticket: false,
+//           ticket: null,
+//           message: 'No lottery ticket found. Vote to participate.'
+//         });
+//       }
+
+//       const ticket = result.rows[0];
+
+//       res.json({
+//         hasTicket: true,
+//         has_ticket: true,
+//         ticket: {
+//           id: ticket.ticket_id,
+//           ticket_id: ticket.ticket_id,
+//           ticket_number: ticket.ticket_number,
+//           ball_number: ticket.ball_number,
+//           user_id: ticket.user_id,
+//           election_id: ticket.election_id,
+//           created_at: ticket.created_at,
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get user ticket error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve lottery ticket' });
+//     }
+//   }
+
+//   // GET LOTTERY PARTICIPANTS
+//   async getLotteryParticipants(req, res) {
+//     try {
+//       const { electionId } = req.params;
+
+//       const result = await pool.query(
+//         `SELECT lt.ticket_id, lt.ticket_number, lt.ball_number, lt.user_id, lt.created_at,
+//                 ud.first_name, ud.last_name,
+//                 CONCAT(COALESCE(ud.first_name, ''), ' ', COALESCE(ud.last_name, '')) as full_name
+//          FROM votteryy_lottery_tickets lt
+//          LEFT JOIN votteryy_user_details ud ON lt.user_id::integer = ud.user_id
+//          WHERE lt.election_id = $1 ORDER BY lt.created_at ASC`,
+//         [electionId]
+//       );
+
+//       const participants = result.rows.map(p => ({
+//         id: p.ticket_id,
+//         ticket_id: p.ticket_id,
+//         ticket_number: p.ticket_number,
+//         ball_number: p.ball_number,
+//         user_id: p.user_id,
+//         full_name: p.full_name?.trim() || `User #${p.user_id}`,
+//         first_name: p.first_name,
+//         last_name: p.last_name,
+//         created_at: p.created_at,
+//       }));
+
+//       res.json({
+//         participants,
+//         count: participants.length,
+//         totalCount: participants.length,
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get lottery participants error:', error);
+//       res.status(500).json({ error: 'Failed to retrieve lottery participants' });
+//     }
+//   }
+
+//   // DRAW LOTTERY (Manual - Admin Only)
+//   async drawLottery(req, res) {
+//     const client = await pool.connect();
+//     try {
+//       await client.query('BEGIN');
+
+//       const { electionId } = req.params;
+//       const adminId = req.user.userId;
+
+//       if (!req.user.roles.includes('admin') && !req.user.roles.includes('manager')) {
+//         return res.status(403).json({ error: 'Admin access required' });
+//       }
+
+//       const electionResult = await client.query(
+//         `SELECT * FROM votteryyy_elections WHERE id = $1`,
+//         [electionId]
+//       );
+
+//       if (electionResult.rows.length === 0) {
+//         return res.status(404).json({ error: 'Election not found' });
+//       }
+
+//       const election = electionResult.rows[0];
+
+//       if (!election.lottery_enabled) {
+//         return res.status(400).json({ error: 'Lottery not enabled for this election' });
+//       }
+
+//       const existingDrawResult = await client.query(
+//         `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+//         [electionId]
+//       );
+
+//       if (existingDrawResult.rows.length > 0) {
+//         return res.status(400).json({ error: 'Lottery already drawn for this election' });
+//       }
+
+//       const { winners, randomSeed, totalParticipants, prizeDistribution, totalPrizePool, rewardType } = 
+//         await rngService.selectLotteryWinners(electionId, election.lottery_winner_count);
+
+//       if (winners.length === 0) {
+//         return res.status(400).json({ error: 'No participants found for lottery' });
+//       }
+
+//       const drawResult = await client.query(
+//         `INSERT INTO votteryy_lottery_draws
+//          (election_id, total_participants, winner_count, random_seed, status, metadata)
+//          VALUES ($1, $2, $3, $4, $5, $6)
+//          RETURNING draw_id`,
+//         [
+//           electionId,
+//           totalParticipants,
+//           winners.length,
+//           randomSeed,
+//           'completed',
+//           JSON.stringify({ prizeDistribution, totalPrizePool, drawn_by: adminId })
+//         ]
+//       );
+
+//       const drawId = drawResult.rows[0].draw_id;
+//       const prizeDistArray = prizeDistribution || [];
+//       const winnerRecords = [];
+
+//       for (let i = 0; i < winners.length; i++) {
+//         const winner = winners[i];
+//         const rank = i + 1;
+
+//         let prizeAmount = 0;
+//         let prizePercentage = 0;
+
+//         if (rewardType === 'monetary' && prizeDistArray.length > 0) {
+//           const distEntry = prizeDistArray.find(d => d.rank === rank);
+//           if (distEntry) {
+//             prizePercentage = distEntry.percentage;
+//             prizeAmount = (totalPrizePool * prizePercentage) / 100;
+//           } else {
+//             prizeAmount = totalPrizePool / winners.length;
+//             prizePercentage = 100 / winners.length;
+//           }
+//         }
+
+//         const winnerResult = await client.query(
+//           `INSERT INTO votteryy_lottery_winners
+//            (election_id, user_id, ticket_id, rank, prize_amount, prize_percentage, prize_description, prize_type, claimed, disbursement_status)
+//            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+//            RETURNING *`,
+//           [
+//             electionId, winner.user_id, winner.ticket_id, rank, prizeAmount, prizePercentage,
+//             election.lottery_prize_description, rewardType, false, 'pending_claim'
+//           ]
+//         );
+
+//         winnerRecords.push(winnerResult.rows[0]);
+//       }
+
+//       await client.query(
+//         `INSERT INTO votteryy_audit_logs 
+//          (action, entity_type, entity_id, user_id, details)
+//          VALUES ($1, $2, $3, $4, $5)`,
+//         [
+//           'LOTTERY_DRAWN', 'election', electionId, adminId,
+//           JSON.stringify({ draw_id: drawId, total_participants: totalParticipants, winner_count: winners.length })
+//         ]
+//       );
+
+//       await client.query('COMMIT');
+
+//       res.json({
+//         success: true,
+//         drawId,
+//         draw_id: drawId,
+//         totalParticipants,
+//         total_participants: totalParticipants,
+//         winners: winnerRecords.map(w => ({ ...w, prize_amount: parseFloat(w.prize_amount || 0) })),
+//         randomSeed,
+//         random_seed: randomSeed,
+//         message: 'Lottery drawn successfully. Winners can now claim their prizes.'
+//       });
+
+//     } catch (error) {
+//       await client.query('ROLLBACK');
+//       console.error('❌ Draw lottery error:', error);
+//       res.status(500).json({ error: 'Failed to draw lottery' });
+//     } finally {
+//       client.release();
+//     }
+//   }
+
+
+
+//   // Add this method to your LotteryController class (uncommented and fixed)
+
+// async autoDrawLottery(electionId) {
+//   const client = await pool.connect();
+//   try {
+//     await client.query('BEGIN');
+
+//     console.log(`🎰 Auto-draw started for election ${electionId}`);
+
+//     const electionResult = await client.query(
+//       `SELECT * FROM votteryyy_elections WHERE id = $1`,
+//       [electionId]
+//     );
+
+//     if (electionResult.rows.length === 0) {
+//       throw new Error('Election not found');
+//     }
+
+//     const election = electionResult.rows[0];
+//     const now = new Date();
+//     const endDate = new Date(`${election.end_date} ${election.end_time || '23:59:59'}`);
+
+//     if (now < endDate) {
+//       throw new Error('Election not yet ended');
+//     }
+
+//     if (!election.lottery_enabled) {
+//       throw new Error('Lottery not enabled');
+//     }
+
+//     // Check if already drawn
+//     const existingDraw = await client.query(
+//       `SELECT * FROM votteryy_lottery_draws WHERE election_id = $1`,
+//       [electionId]
+//     );
+
+//     if (existingDraw.rows.length > 0) {
+//       throw new Error('Lottery already drawn');
+//     }
+
+//     // Select winners
+//     const { winners, randomSeed, totalParticipants, prizeDistribution, totalPrizePool, rewardType } = 
+//       await rngService.selectLotteryWinners(electionId, election.lottery_winner_count);
+
+//     if (winners.length === 0) {
+//       throw new Error('No participants found for lottery');
+//     }
+
+//     // Record lottery draw
+//     const drawResult = await client.query(
+//       `INSERT INTO votteryy_lottery_draws
+//        (election_id, total_participants, winner_count, random_seed, status, metadata)
+//        VALUES ($1, $2, $3, $4, $5, $6)
+//        RETURNING draw_id`,
+//       [
+//         electionId,
+//         totalParticipants,
+//         winners.length,
+//         randomSeed,
+//         'completed',
+//         JSON.stringify({ prizeDistribution, totalPrizePool, autoDrawn: true })
+//       ]
+//     );
+
+//     const drawId = drawResult.rows[0].draw_id;
+//     const prizeDistArray = prizeDistribution || [];
+//     const winnerRecords = [];
+
+//     for (let i = 0; i < winners.length; i++) {
+//       const winner = winners[i];
+//       const rank = i + 1;
+
+//       let prizeAmount = 0;
+//       let prizePercentage = 0;
+
+//       if (rewardType === 'monetary' && prizeDistArray.length > 0) {
+//         const distEntry = prizeDistArray.find(d => d.rank === rank);
+//         if (distEntry) {
+//           prizePercentage = distEntry.percentage;
+//           prizeAmount = (totalPrizePool * prizePercentage) / 100;
+//         } else {
+//           prizeAmount = totalPrizePool / winners.length;
+//           prizePercentage = 100 / winners.length;
+//         }
+//       }
+
+//       // FIX: Added disbursement_status column
+//       const winnerResult = await client.query(
+//         `INSERT INTO votteryy_lottery_winners
+//          (election_id, user_id, ticket_id, rank, prize_amount, prize_percentage, prize_description, prize_type, claimed, disbursement_status)
+//          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+//          RETURNING *`,
+//         [
+//           electionId,
+//           winner.user_id,
+//           winner.ticket_id,
+//           rank,
+//           prizeAmount,
+//           prizePercentage,
+//           election.lottery_prize_description,
+//           rewardType,
+//           false,
+//           'pending_claim'  // Added this
+//         ]
+//       );
+
+//       winnerRecords.push(winnerResult.rows[0]);
+
+//       // Log winner
+//       console.log(`🏆 Winner (Rank ${rank}): User ${winner.user_id} won ${rewardType === 'monetary' ? `$${prizeAmount.toFixed(2)}` : election.lottery_prize_description}`);
+//     }
+
+//     // Audit log
+//     await client.query(
+//       `INSERT INTO votteryy_audit_logs 
+//        (action, entity_type, entity_id, user_id, details)
+//        VALUES ($1, $2, $3, $4, $5)`,
+//       [
+//         'LOTTERY_AUTO_DRAWN',
+//         'election',
+//         electionId,
+//         null,  // System/auto draw
+//         JSON.stringify({ draw_id: drawId, total_participants: totalParticipants, winner_count: winners.length })
+//       ]
+//     );
+
+//     await client.query('COMMIT');
+
+//     console.log(`✅ Auto-drew lottery for election ${electionId}, ${winners.length} winners`);
+//     return { success: true, drawId, winners: winnerRecords };
+
+//   } catch (error) {
+//     await client.query('ROLLBACK');
+//     console.error(`❌ Auto-draw lottery error for election ${electionId}:`, error.message);
+//     throw error;
+//   } finally {
+//     client.release();
+//   }
+// }
+
+//   // ADMIN: UPDATE DISBURSEMENT CONFIG
+//   async updateDisbursementConfig(req, res) {
+//     try {
+//       const adminId = req.user.userId;
+//       const { config_key, config_value } = req.body;
+
+//       if (!['AUTO_DISBURSE_THRESHOLD', 'LARGE_AMOUNT_THRESHOLD', 'MAX_AUTO_DISBURSE_DAILY'].includes(config_key)) {
+//         return res.status(400).json({ error: 'Invalid config key' });
+//       }
+
+//       await pool.query(
+//         `UPDATE votteryy_disbursement_config 
+//          SET config_value = $1, updated_at = CURRENT_TIMESTAMP, updated_by = $2
+//          WHERE config_key = $3`,
+//         [config_value, adminId, config_key]
+//       );
+
+//       DISBURSEMENT_CONFIG[config_key] = parseFloat(config_value);
+
+//       res.json({ success: true, message: 'Configuration updated', config: DISBURSEMENT_CONFIG });
+
+//     } catch (error) {
+//       console.error('❌ Update config error:', error);
+//       res.status(500).json({ error: 'Failed to update configuration' });
+//     }
+//   }
+
+//   // ADMIN: GET DISBURSEMENT CONFIG
+//   async getDisbursementConfig(req, res) {
+//     try {
+//       const result = await pool.query(
+//         `SELECT * FROM votteryy_disbursement_config ORDER BY config_key`
+//       );
+
+//       res.json({ config: result.rows, current: DISBURSEMENT_CONFIG });
+
+//     } catch (error) {
+//       console.error('❌ Get config error:', error);
+//       res.status(500).json({ error: 'Failed to get configuration' });
+//     }
+//   }
+// }
+
+// export default new LotteryController();
 //last workable code only to rectify elecitonstat above code
 // import pool from '../config/database.js';
 // import rngService from '../services/rng.service.js';
