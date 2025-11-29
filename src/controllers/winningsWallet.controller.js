@@ -563,85 +563,164 @@ const winningsWalletController = {
   // GET COMPLETE TRANSACTION HISTORY (Combined view)
   // GET /api/lottery/wallet/transactions
   // =====================================================
-  async getTransactionHistory(req, res) {
-    try {
-      const userId = req.user.userId;
-      const { page = 1, limit = 20, type = 'all' } = req.query;
-      const offset = (page - 1) * limit;
+  // Find this function and replace it:
+async getTransactionHistory(req, res) {
+  try {
+    const userId = req.user.userId;
+    const { page = 1, limit = 20, type = 'all' } = req.query;
+    const offset = (page - 1) * limit;
 
-      // Build combined query for wins and withdrawals
-      let transactions = [];
+    let transactions = [];
 
-      // Get winnings (credits)
-      const winningsResult = await pool.query(
-        `SELECT 
-          winner_id as id,
-          'prize_won' as type,
-          prize_amount as amount,
-          disbursement_status as status,
-          created_at,
-          disbursed_at as completed_at,
-          election_id,
-          e.title as description
-         FROM votteryy_lottery_winners lw
-         JOIN votteryyy_elections e ON lw.election_id = e.id
-         WHERE lw.user_id = $1 AND lw.disbursement_status = 'disbursed'
-         ORDER BY lw.disbursed_at DESC`,
-        [userId]
-      );
+    // Get winnings (credits) - FIXED: Use table alias for created_at
+    const winningsResult = await pool.query(
+      `SELECT 
+        lw.winner_id as id,
+        'prize_won' as type,
+        lw.prize_amount as amount,
+        lw.disbursement_status as status,
+        lw.created_at,
+        lw.disbursed_at as completed_at,
+        lw.election_id,
+        e.title as description
+       FROM votteryy_lottery_winners lw
+       JOIN votteryyy_elections e ON lw.election_id = e.id
+       WHERE lw.user_id = $1 AND lw.disbursement_status = 'disbursed'
+       ORDER BY lw.disbursed_at DESC`,
+      [userId]
+    );
 
-      // Get withdrawals (debits)
-      const withdrawalsResult = await pool.query(
-        `SELECT 
-          id,
-          'withdrawal' as type,
-          amount,
-          status,
-          created_at,
-          completed_at,
-          reference as description,
-          method,
-          balance_before,
-          balance_after
-         FROM votteryy_winnings_withdrawals
-         WHERE user_id = $1
-         ORDER BY created_at DESC`,
-        [userId]
-      );
+    // Get withdrawals (debits)
+    const withdrawalsResult = await pool.query(
+      `SELECT 
+        id,
+        'withdrawal' as type,
+        amount,
+        status,
+        created_at,
+        completed_at,
+        reference as description,
+        method,
+        balance_before,
+        balance_after
+       FROM votteryy_winnings_withdrawals
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [userId]
+    );
 
-      // Combine and sort
-      const allTransactions = [
-        ...winningsResult.rows.map(t => ({ ...t, direction: 'credit' })),
-        ...withdrawalsResult.rows.map(t => ({ ...t, direction: 'debit' }))
-      ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    // Combine and sort
+    const allTransactions = [
+      ...winningsResult.rows.map(t => ({ ...t, direction: 'credit' })),
+      ...withdrawalsResult.rows.map(t => ({ ...t, direction: 'debit' }))
+    ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-      // Filter by type if specified
-      let filteredTransactions = allTransactions;
-      if (type === 'credits') {
-        filteredTransactions = allTransactions.filter(t => t.direction === 'credit');
-      } else if (type === 'debits') {
-        filteredTransactions = allTransactions.filter(t => t.direction === 'debit');
-      }
-
-      // Paginate
-      const paginatedTransactions = filteredTransactions.slice(offset, offset + parseInt(limit));
-
-      res.json({
-        success: true,
-        transactions: paginatedTransactions,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: filteredTransactions.length,
-          totalPages: Math.ceil(filteredTransactions.length / limit)
-        }
-      });
-
-    } catch (error) {
-      console.error('❌ Get transaction history error:', error);
-      res.status(500).json({ error: 'Failed to get transaction history' });
+    // Filter by type if specified
+    let filteredTransactions = allTransactions;
+    if (type === 'credits') {
+      filteredTransactions = allTransactions.filter(t => t.direction === 'credit');
+    } else if (type === 'debits') {
+      filteredTransactions = allTransactions.filter(t => t.direction === 'debit');
     }
+
+    // Paginate
+    const paginatedTransactions = filteredTransactions.slice(offset, offset + parseInt(limit));
+
+    res.json({
+      success: true,
+      transactions: paginatedTransactions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: filteredTransactions.length,
+        totalPages: Math.ceil(filteredTransactions.length / limit)
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Get transaction history error:', error);
+    res.status(500).json({ error: 'Failed to get transaction history' });
   }
+}
+//   async getTransactionHistory(req, res) {
+//     try {
+//       const userId = req.user.userId;
+//       const { page = 1, limit = 20, type = 'all' } = req.query;
+//       const offset = (page - 1) * limit;
+
+//       // Build combined query for wins and withdrawals
+//       let transactions = [];
+
+//       // Get winnings (credits)
+//       const winningsResult = await pool.query(
+//         `SELECT 
+//           winner_id as id,
+//           'prize_won' as type,
+//           prize_amount as amount,
+//           disbursement_status as status,
+//           created_at,
+//           disbursed_at as completed_at,
+//           election_id,
+//           e.title as description
+//          FROM votteryy_lottery_winners lw
+//          JOIN votteryyy_elections e ON lw.election_id = e.id
+//          WHERE lw.user_id = $1 AND lw.disbursement_status = 'disbursed'
+//          ORDER BY lw.disbursed_at DESC`,
+//         [userId]
+//       );
+
+//       // Get withdrawals (debits)
+//       const withdrawalsResult = await pool.query(
+//         `SELECT 
+//           id,
+//           'withdrawal' as type,
+//           amount,
+//           status,
+//           created_at,
+//           completed_at,
+//           reference as description,
+//           method,
+//           balance_before,
+//           balance_after
+//          FROM votteryy_winnings_withdrawals
+//          WHERE user_id = $1
+//          ORDER BY created_at DESC`,
+//         [userId]
+//       );
+
+//       // Combine and sort
+//       const allTransactions = [
+//         ...winningsResult.rows.map(t => ({ ...t, direction: 'credit' })),
+//         ...withdrawalsResult.rows.map(t => ({ ...t, direction: 'debit' }))
+//       ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+//       // Filter by type if specified
+//       let filteredTransactions = allTransactions;
+//       if (type === 'credits') {
+//         filteredTransactions = allTransactions.filter(t => t.direction === 'credit');
+//       } else if (type === 'debits') {
+//         filteredTransactions = allTransactions.filter(t => t.direction === 'debit');
+//       }
+
+//       // Paginate
+//       const paginatedTransactions = filteredTransactions.slice(offset, offset + parseInt(limit));
+
+//       res.json({
+//         success: true,
+//         transactions: paginatedTransactions,
+//         pagination: {
+//           page: parseInt(page),
+//           limit: parseInt(limit),
+//           total: filteredTransactions.length,
+//           totalPages: Math.ceil(filteredTransactions.length / limit)
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('❌ Get transaction history error:', error);
+//       res.status(500).json({ error: 'Failed to get transaction history' });
+//     }
+//   }
 };
 
 export default winningsWalletController;
