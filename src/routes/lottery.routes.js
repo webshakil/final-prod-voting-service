@@ -1,5 +1,9 @@
+// routes/lottery.routes.js
+// ✅ UPDATED WITH WINNINGS WALLET ENDPOINTS
+
 import express from 'express';
 import lotteryController from '../controllers/lottery.controller.js';
+import winningsWalletController from '../controllers/winningsWallet.controller.js';
 import roleCheck from '../ middleware/roleCheck.js';
 //import roleCheck from '../middleware/roleCheck.js';
 
@@ -19,6 +23,27 @@ router.get('/my-winnings', roleCheck(['voter']), lotteryController.getUserWinnin
 router.post('/winners/:winnerId/claim', roleCheck(['voter']), lotteryController.claimPrize);
 
 // =====================================================
+// 🆕 USER WINNINGS WALLET ROUTES
+// =====================================================
+// Get wallet summary (balance, available, withdrawn, etc.)
+router.get('/wallet', roleCheck(['voter']), winningsWalletController.getWinningsWallet);
+
+// Get transaction history (wins + withdrawals combined)
+router.get('/wallet/transactions', roleCheck(['voter']), winningsWalletController.getTransactionHistory);
+
+// Get withdrawal history only
+router.get('/wallet/withdrawals', roleCheck(['voter']), winningsWalletController.getWithdrawalHistory);
+
+// Get single withdrawal details
+router.get('/wallet/withdrawals/:withdrawalId', roleCheck(['voter']), winningsWalletController.getWithdrawalDetails);
+
+// Request a withdrawal
+router.post('/wallet/withdraw', roleCheck(['voter']), winningsWalletController.requestWithdrawal);
+
+// Cancel pending withdrawal
+router.post('/wallet/withdrawals/:withdrawalId/cancel', roleCheck(['voter']), winningsWalletController.cancelWithdrawal);
+
+// =====================================================
 // ADMIN ROUTES
 // =====================================================
 router.get('/elections/:electionId/participants', roleCheck(['admin', 'manager']), lotteryController.getLotteryParticipants);
@@ -30,18 +55,68 @@ router.post('/admin/winners/:winnerId/reject', roleCheck(['admin', 'manager']), 
 router.post('/admin/disbursements/bulk-approve', roleCheck(['admin', 'manager']), lotteryController.bulkApproveDisbursements);
 
 // =====================================================
+// 🆕 ADMIN WITHDRAWAL MANAGEMENT ROUTES
+// =====================================================
+// Get all pending withdrawals
+router.get('/wallet/admin/pending-withdrawals', roleCheck(['admin', 'manager']), winningsWalletController.getAdminPendingWithdrawals);
+
+// Process withdrawal (approve/complete/reject)
+router.post('/wallet/admin/withdrawals/:withdrawalId/process', roleCheck(['admin', 'manager']), winningsWalletController.processWithdrawal);
+
+// =====================================================
 // CONFIG ROUTES (Manager Only for Updates)
 // =====================================================
-// GET config - admin and manager can view
 router.get('/admin/config', roleCheck(['admin', 'manager']), lotteryController.getDisbursementConfig);
-
-// PUT single config - manager only
 router.put('/admin/config', roleCheck(['manager']), lotteryController.updateDisbursementConfig);
-
-// PUT bulk config - manager only (update all at once)
 router.put('/admin/config/bulk', roleCheck(['manager']), lotteryController.bulkUpdateDisbursementConfig);
 
 export default router;
+
+//last workable codes only to add winning contraoler above code
+// import express from 'express';
+// import lotteryController from '../controllers/lottery.controller.js';
+// import roleCheck from '../ middleware/roleCheck.js';
+// //import roleCheck from '../middleware/roleCheck.js';
+
+// const router = express.Router();
+
+// // =====================================================
+// // PUBLIC ROUTES
+// // =====================================================
+// router.get('/elections/:electionId/info', lotteryController.getLotteryInfo);
+// router.get('/elections/:electionId/winners', lotteryController.getWinnersAnnouncement);
+
+// // =====================================================
+// // USER ROUTES (Voters)
+// // =====================================================
+// router.get('/elections/:electionId/my-ticket', roleCheck(['voter']), lotteryController.getUserTicket);
+// router.get('/my-winnings', roleCheck(['voter']), lotteryController.getUserWinningHistory);
+// router.post('/winners/:winnerId/claim', roleCheck(['voter']), lotteryController.claimPrize);
+
+// // =====================================================
+// // ADMIN ROUTES
+// // =====================================================
+// router.get('/elections/:electionId/participants', roleCheck(['admin', 'manager']), lotteryController.getLotteryParticipants);
+// router.post('/elections/:electionId/draw', roleCheck(['admin', 'manager']), lotteryController.drawLottery);
+// router.get('/admin/pending-approvals', roleCheck(['admin', 'manager']), lotteryController.getPendingApprovals);
+// router.get('/admin/disbursements', roleCheck(['admin', 'manager']), lotteryController.getDisbursementHistory);
+// router.post('/admin/winners/:winnerId/approve', roleCheck(['admin', 'manager']), lotteryController.approveDisbursement);
+// router.post('/admin/winners/:winnerId/reject', roleCheck(['admin', 'manager']), lotteryController.rejectDisbursement);
+// router.post('/admin/disbursements/bulk-approve', roleCheck(['admin', 'manager']), lotteryController.bulkApproveDisbursements);
+
+// // =====================================================
+// // CONFIG ROUTES (Manager Only for Updates)
+// // =====================================================
+// // GET config - admin and manager can view
+// router.get('/admin/config', roleCheck(['admin', 'manager']), lotteryController.getDisbursementConfig);
+
+// // PUT single config - manager only
+// router.put('/admin/config', roleCheck(['manager']), lotteryController.updateDisbursementConfig);
+
+// // PUT bulk config - manager only (update all at once)
+// router.put('/admin/config/bulk', roleCheck(['manager']), lotteryController.bulkUpdateDisbursementConfig);
+
+// export default router;
 //last workable code only to add new api above code
 // import express from 'express';
 // import lotteryController from '../controllers/lottery.controller.js';
