@@ -456,123 +456,343 @@ class VerificationController {
    * Get audit logs with advanced filtering
    * Supports pagination, date range, action type, election, and user filters
    */
-  async getAuditLogs(req, res) {
-    try {
-      const { 
-        electionId, 
-        page = 1, 
-        limit = 20, 
-        actionType, 
-        startDate, 
-        endDate, 
-        userId 
-      } = req.query;
+  // =====================================================
+// ENHANCED getAuditLogs - Queries ALL 3 Audit Tables
+// Replace ONLY the getAuditLogs method in verification.controller.js
+// ALL OTHER METHODS REMAIN UNCHANGED
+// =====================================================
 
-      // Use electionId from params if provided (for /audit/logs/:electionId route)
-      const effectiveElectionId = req.params.electionId || electionId;
-      const offset = (page - 1) * limit;
+/**
+ * Get audit logs with advanced filtering
+ * NOW QUERIES ALL 3 TABLES: votteryy_audit_logs, votteryy_vote_audit, votteryy_audit_timeline
+ * Supports pagination, date range, action type, election, and user filters
+ */
+async getAuditLogs(req, res) {
+  try {
+    const { 
+      electionId, 
+      page = 1, 
+      limit = 20, 
+      actionType, 
+      startDate, 
+      endDate, 
+      userId,
+      source = 'all' // 'all', 'security', 'votes', 'timeline'
+    } = req.query;
 
-      console.log('📋 Getting audit logs with filters:', { effectiveElectionId, actionType, startDate, endDate, userId });
+    // Use electionId from params if provided (for /audit/logs/:electionId route)
+    const effectiveElectionId = req.params.electionId || electionId;
+    const offset = (page - 1) * limit;
 
-      // Build dynamic WHERE clause
-      let whereClause = 'WHERE 1=1';
-      const params = [];
-      let paramIndex = 1;
+    console.log('📋 Getting audit logs with filters:', { effectiveElectionId, actionType, startDate, endDate, userId, source });
 
-      if (effectiveElectionId) {
-        whereClause += ` AND al.election_id = $${paramIndex}`;
-        params.push(effectiveElectionId);
-        paramIndex++;
-      }
+    // Build dynamic WHERE clauses for each table
+    let params = [];
+    let paramIndex = 1;
 
-      if (actionType) {
-        whereClause += ` AND al.attempt_type = $${paramIndex}`;
-        params.push(actionType);
-        paramIndex++;
-      }
+    // =====================================================
+    // TABLE 1: votteryy_audit_logs (Security Alerts)
+    // =====================================================
+    let auditLogsWhere = 'WHERE al.attempt_type IS NOT NULL';
+    
+    if (effectiveElectionId) {
+      auditLogsWhere += ` AND al.election_id = $${paramIndex}`;
+      params.push(effectiveElectionId);
+      paramIndex++;
+    }
 
-      if (startDate) {
-        whereClause += ` AND al.attempted_at >= $${paramIndex}`;
-        params.push(startDate);
-        paramIndex++;
-      }
+    if (actionType) {
+      auditLogsWhere += ` AND al.attempt_type = $${paramIndex}`;
+      params.push(actionType);
+      paramIndex++;
+    }
 
-      if (endDate) {
-        whereClause += ` AND al.attempted_at <= $${paramIndex}`;
-        params.push(endDate);
-        paramIndex++;
-      }
+    if (startDate) {
+      auditLogsWhere += ` AND al.attempted_at >= $${paramIndex}`;
+      params.push(startDate);
+      paramIndex++;
+    }
 
-      if (userId) {
-        whereClause += ` AND al.user_id = $${paramIndex}`;
-        params.push(userId);
-        paramIndex++;
-      }
+    if (endDate) {
+      auditLogsWhere += ` AND al.attempted_at <= $${paramIndex}`;
+      params.push(endDate);
+      paramIndex++;
+    }
 
-      // Main query with joins for enriched data
-      const query = `
+    if (userId) {
+      auditLogsWhere += ` AND al.user_id = $${paramIndex}`;
+      params.push(userId);
+      paramIndex++;
+    }
+
+    // Store param count for reuse
+    const baseParamCount = params.length;
+
+    // =====================================================
+    // COMBINED QUERY - All 3 Tables with UNION ALL
+    // =====================================================
+    const combinedQuery = `
+      WITH combined_logs AS (
+        -- TABLE 1: Security Alerts (votteryy_audit_logs)
         SELECT 
           al.id,
-          al.user_id,
+          al.user_id::text as user_id,
           al.election_id,
           al.attempt_type as action_type,
           al.ip_address,
           al.user_agent,
           al.attempted_at as created_at,
+          al.flagged_for_review,
+          'security_alert' as source,
           e.title as election_title,
           e.status as election_status,
           COALESCE(
             NULLIF(CONCAT(ud.first_name, ' ', ud.last_name), ' '), 
             'User #' || al.user_id::text
-          ) as user_name,
-          ud.email as user_email
+          ) as user_name
         FROM votteryy_audit_logs al
         LEFT JOIN votteryyy_elections e ON al.election_id = e.id
-        LEFT JOIN votteryy_user_details ud ON al.user_id::text = ud.user_id::text
-        ${whereClause}
-        ORDER BY al.attempted_at DESC
-        LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-      `;
+        LEFT JOIN votteryy_user_details ud ON al.user_id = ud.user_id
+        ${auditLogsWhere}
 
-      params.push(parseInt(limit), offset);
-      const result = await pool.query(query, params);
+        UNION ALL
 
-      // Get total count for pagination
-      const countParams = params.slice(0, -2);
-      const countQuery = `
-        SELECT COUNT(*) as total 
-        FROM votteryy_audit_logs al 
-        ${whereClause}
-      `;
-      const countResult = await pool.query(countQuery, countParams);
-      const total = parseInt(countResult.rows[0].total);
+        -- TABLE 2: Vote Audit (votteryy_vote_audit) - Duplicate vote attempts
+        SELECT 
+          va.id,
+          va.user_id::text as user_id,
+          va.election_id,
+          va.attempt_type as action_type,
+          va.ip_address,
+          va.user_agent,
+          va.attempted_at as created_at,
+          va.flagged_for_review,
+          'vote_audit' as source,
+          e.title as election_title,
+          e.status as election_status,
+          'User #' || va.user_id::text as user_name
+        FROM votteryy_vote_audit va
+        LEFT JOIN votteryyy_elections e ON va.election_id = e.id
+        WHERE va.attempt_type IS NOT NULL
+        ${effectiveElectionId ? `AND va.election_id = ${effectiveElectionId}` : ''}
+        ${actionType ? `AND va.attempt_type = '${actionType}'` : ''}
 
-      console.log(`✅ Found ${result.rows.length} audit entries (total: ${total})`);
+        UNION ALL
 
-      res.json({
-        success: true,
-        data: {
-          auditLogs: result.rows,
-          pagination: {
-            page: parseInt(page),
-            limit: parseInt(limit),
-            total,
-            totalPages: Math.ceil(total / limit),
-            hasNextPage: page * limit < total,
-            hasPrevPage: page > 1
-          }
+        -- TABLE 3: Audit Timeline (votteryy_audit_timeline) - All events
+        SELECT 
+          at.id,
+          at.actor_id as user_id,
+          at.election_id,
+          at.event_type as action_type,
+          at.ip_address::text as ip_address,
+          at.user_agent,
+          at.timestamp as created_at,
+          false as flagged_for_review,
+          'timeline' as source,
+          e.title as election_title,
+          e.status as election_status,
+          COALESCE(at.actor_role, 'User') || ' #' || COALESCE(at.actor_id, 'unknown') as user_name
+        FROM votteryy_audit_timeline at
+        LEFT JOIN votteryyy_elections e ON at.election_id = e.id
+        WHERE at.event_type IS NOT NULL
+        ${effectiveElectionId ? `AND at.election_id = ${effectiveElectionId}` : ''}
+        ${actionType ? `AND at.event_type = '${actionType}'` : ''}
+      )
+      SELECT * FROM combined_logs
+      ORDER BY created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `;
+
+    params.push(parseInt(limit), offset);
+
+    const result = await pool.query(combinedQuery, params);
+
+    // =====================================================
+    // COUNT QUERY - Get total from all 3 tables
+    // =====================================================
+    const countParams = params.slice(0, baseParamCount);
+    
+    const countQuery = `
+      SELECT (
+        (SELECT COUNT(*) FROM votteryy_audit_logs al ${auditLogsWhere}) +
+        (SELECT COUNT(*) FROM votteryy_vote_audit va 
+         WHERE va.attempt_type IS NOT NULL 
+         ${effectiveElectionId ? `AND va.election_id = ${effectiveElectionId}` : ''}) +
+        (SELECT COUNT(*) FROM votteryy_audit_timeline at 
+         WHERE at.event_type IS NOT NULL 
+         ${effectiveElectionId ? `AND at.election_id = ${effectiveElectionId}` : ''})
+      ) as total
+    `;
+    
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
+
+    // =====================================================
+    // SOURCE BREAKDOWN - Show counts per table
+    // =====================================================
+    const breakdownQuery = `
+      SELECT 
+        (SELECT COUNT(*) FROM votteryy_audit_logs WHERE attempt_type IS NOT NULL 
+         ${effectiveElectionId ? `AND election_id = ${effectiveElectionId}` : ''}) as security_alerts,
+        (SELECT COUNT(*) FROM votteryy_vote_audit WHERE attempt_type IS NOT NULL
+         ${effectiveElectionId ? `AND election_id = ${effectiveElectionId}` : ''}) as vote_audits,
+        (SELECT COUNT(*) FROM votteryy_audit_timeline WHERE event_type IS NOT NULL
+         ${effectiveElectionId ? `AND election_id = ${effectiveElectionId}` : ''}) as timeline_events
+    `;
+    const breakdownResult = await pool.query(breakdownQuery);
+    const breakdown = breakdownResult.rows[0];
+
+    console.log(`✅ Found ${result.rows.length} audit entries (total: ${total})`);
+    console.log(`   📊 Breakdown: ${breakdown.security_alerts} security alerts, ${breakdown.vote_audits} vote audits, ${breakdown.timeline_events} timeline events`);
+
+    res.json({
+      success: true,
+      data: {
+        auditLogs: result.rows,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasNextPage: page * limit < total,
+          hasPrevPage: page > 1
+        },
+        // 🆕 NEW: Source breakdown
+        sources: {
+          security_alerts: parseInt(breakdown.security_alerts),
+          vote_audits: parseInt(breakdown.vote_audits),
+          timeline_events: parseInt(breakdown.timeline_events)
         }
-      });
+      }
+    });
 
-    } catch (error) {
-      console.error('❌ Get audit logs error:', error);
-      res.status(500).json({ 
-        success: false,
-        error: 'Failed to retrieve audit logs',
-        message: error.message 
-      });
-    }
+  } catch (error) {
+    console.error('❌ Get audit logs error:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to retrieve audit logs',
+      message: error.message 
+    });
   }
+}
+  // async getAuditLogs(req, res) {
+  //   try {
+  //     const { 
+  //       electionId, 
+  //       page = 1, 
+  //       limit = 20, 
+  //       actionType, 
+  //       startDate, 
+  //       endDate, 
+  //       userId 
+  //     } = req.query;
+
+  //     // Use electionId from params if provided (for /audit/logs/:electionId route)
+  //     const effectiveElectionId = req.params.electionId || electionId;
+  //     const offset = (page - 1) * limit;
+
+  //     console.log('📋 Getting audit logs with filters:', { effectiveElectionId, actionType, startDate, endDate, userId });
+
+  //     // Build dynamic WHERE clause
+  //     let whereClause = 'WHERE 1=1';
+  //     const params = [];
+  //     let paramIndex = 1;
+
+  //     if (effectiveElectionId) {
+  //       whereClause += ` AND al.election_id = $${paramIndex}`;
+  //       params.push(effectiveElectionId);
+  //       paramIndex++;
+  //     }
+
+  //     if (actionType) {
+  //       whereClause += ` AND al.attempt_type = $${paramIndex}`;
+  //       params.push(actionType);
+  //       paramIndex++;
+  //     }
+
+  //     if (startDate) {
+  //       whereClause += ` AND al.attempted_at >= $${paramIndex}`;
+  //       params.push(startDate);
+  //       paramIndex++;
+  //     }
+
+  //     if (endDate) {
+  //       whereClause += ` AND al.attempted_at <= $${paramIndex}`;
+  //       params.push(endDate);
+  //       paramIndex++;
+  //     }
+
+  //     if (userId) {
+  //       whereClause += ` AND al.user_id = $${paramIndex}`;
+  //       params.push(userId);
+  //       paramIndex++;
+  //     }
+
+  //     // Main query with joins for enriched data
+  //     const query = `
+  //       SELECT 
+  //         al.id,
+  //         al.user_id,
+  //         al.election_id,
+  //         al.attempt_type as action_type,
+  //         al.ip_address,
+  //         al.user_agent,
+  //         al.attempted_at as created_at,
+  //         e.title as election_title,
+  //         e.status as election_status,
+  //         COALESCE(
+  //           NULLIF(CONCAT(ud.first_name, ' ', ud.last_name), ' '), 
+  //           'User #' || al.user_id::text
+  //         ) as user_name,
+  //         ud.email as user_email
+  //       FROM votteryy_audit_logs al
+  //       LEFT JOIN votteryyy_elections e ON al.election_id = e.id
+  //       LEFT JOIN votteryy_user_details ud ON al.user_id::text = ud.user_id::text
+  //       ${whereClause}
+  //       ORDER BY al.attempted_at DESC
+  //       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+  //     `;
+
+  //     params.push(parseInt(limit), offset);
+  //     const result = await pool.query(query, params);
+
+  //     // Get total count for pagination
+  //     const countParams = params.slice(0, -2);
+  //     const countQuery = `
+  //       SELECT COUNT(*) as total 
+  //       FROM votteryy_audit_logs al 
+  //       ${whereClause}
+  //     `;
+  //     const countResult = await pool.query(countQuery, countParams);
+  //     const total = parseInt(countResult.rows[0].total);
+
+  //     console.log(`✅ Found ${result.rows.length} audit entries (total: ${total})`);
+
+  //     res.json({
+  //       success: true,
+  //       data: {
+  //         auditLogs: result.rows,
+  //         pagination: {
+  //           page: parseInt(page),
+  //           limit: parseInt(limit),
+  //           total,
+  //           totalPages: Math.ceil(total / limit),
+  //           hasNextPage: page * limit < total,
+  //           hasPrevPage: page > 1
+  //         }
+  //       }
+  //     });
+
+  //   } catch (error) {
+  //     console.error('❌ Get audit logs error:', error);
+  //     res.status(500).json({ 
+  //       success: false,
+  //       error: 'Failed to retrieve audit logs',
+  //       message: error.message 
+  //     });
+  //   }
+  // }
 
   /**
    * Get comprehensive audit statistics
