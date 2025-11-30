@@ -448,19 +448,7 @@ class VerificationController {
     }
   }
 
-  // ========================================
-  // ⭐ INDUSTRY-STANDARD AUDIT TRAIL SYSTEM ⭐
-  // ========================================
 
-  /**
-   * Get audit logs with advanced filtering
-   * Supports pagination, date range, action type, election, and user filters
-   */
-  // =====================================================
-// ENHANCED getAuditLogs - Queries ALL 3 Audit Tables
-// Replace ONLY the getAuditLogs method in verification.controller.js
-// ALL OTHER METHODS REMAIN UNCHANGED
-// =====================================================
 
 /**
  * Get audit logs with advanced filtering
@@ -676,123 +664,7 @@ async getAuditLogs(req, res) {
     });
   }
 }
-  // async getAuditLogs(req, res) {
-  //   try {
-  //     const { 
-  //       electionId, 
-  //       page = 1, 
-  //       limit = 20, 
-  //       actionType, 
-  //       startDate, 
-  //       endDate, 
-  //       userId 
-  //     } = req.query;
 
-  //     // Use electionId from params if provided (for /audit/logs/:electionId route)
-  //     const effectiveElectionId = req.params.electionId || electionId;
-  //     const offset = (page - 1) * limit;
-
-  //     console.log('📋 Getting audit logs with filters:', { effectiveElectionId, actionType, startDate, endDate, userId });
-
-  //     // Build dynamic WHERE clause
-  //     let whereClause = 'WHERE 1=1';
-  //     const params = [];
-  //     let paramIndex = 1;
-
-  //     if (effectiveElectionId) {
-  //       whereClause += ` AND al.election_id = $${paramIndex}`;
-  //       params.push(effectiveElectionId);
-  //       paramIndex++;
-  //     }
-
-  //     if (actionType) {
-  //       whereClause += ` AND al.attempt_type = $${paramIndex}`;
-  //       params.push(actionType);
-  //       paramIndex++;
-  //     }
-
-  //     if (startDate) {
-  //       whereClause += ` AND al.attempted_at >= $${paramIndex}`;
-  //       params.push(startDate);
-  //       paramIndex++;
-  //     }
-
-  //     if (endDate) {
-  //       whereClause += ` AND al.attempted_at <= $${paramIndex}`;
-  //       params.push(endDate);
-  //       paramIndex++;
-  //     }
-
-  //     if (userId) {
-  //       whereClause += ` AND al.user_id = $${paramIndex}`;
-  //       params.push(userId);
-  //       paramIndex++;
-  //     }
-
-  //     // Main query with joins for enriched data
-  //     const query = `
-  //       SELECT 
-  //         al.id,
-  //         al.user_id,
-  //         al.election_id,
-  //         al.attempt_type as action_type,
-  //         al.ip_address,
-  //         al.user_agent,
-  //         al.attempted_at as created_at,
-  //         e.title as election_title,
-  //         e.status as election_status,
-  //         COALESCE(
-  //           NULLIF(CONCAT(ud.first_name, ' ', ud.last_name), ' '), 
-  //           'User #' || al.user_id::text
-  //         ) as user_name,
-  //         ud.email as user_email
-  //       FROM votteryy_audit_logs al
-  //       LEFT JOIN votteryyy_elections e ON al.election_id = e.id
-  //       LEFT JOIN votteryy_user_details ud ON al.user_id::text = ud.user_id::text
-  //       ${whereClause}
-  //       ORDER BY al.attempted_at DESC
-  //       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
-  //     `;
-
-  //     params.push(parseInt(limit), offset);
-  //     const result = await pool.query(query, params);
-
-  //     // Get total count for pagination
-  //     const countParams = params.slice(0, -2);
-  //     const countQuery = `
-  //       SELECT COUNT(*) as total 
-  //       FROM votteryy_audit_logs al 
-  //       ${whereClause}
-  //     `;
-  //     const countResult = await pool.query(countQuery, countParams);
-  //     const total = parseInt(countResult.rows[0].total);
-
-  //     console.log(`✅ Found ${result.rows.length} audit entries (total: ${total})`);
-
-  //     res.json({
-  //       success: true,
-  //       data: {
-  //         auditLogs: result.rows,
-  //         pagination: {
-  //           page: parseInt(page),
-  //           limit: parseInt(limit),
-  //           total,
-  //           totalPages: Math.ceil(total / limit),
-  //           hasNextPage: page * limit < total,
-  //           hasPrevPage: page > 1
-  //         }
-  //       }
-  //     });
-
-  //   } catch (error) {
-  //     console.error('❌ Get audit logs error:', error);
-  //     res.status(500).json({ 
-  //       success: false,
-  //       error: 'Failed to retrieve audit logs',
-  //       message: error.message 
-  //     });
-  //   }
-  // }
 
   /**
    * Get comprehensive audit statistics
