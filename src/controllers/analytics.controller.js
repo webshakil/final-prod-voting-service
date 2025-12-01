@@ -808,7 +808,8 @@ async getPlatformRevenueReport(req, res) {
           // CHANGED: Now using subscriptionPaymentRevenue instead of subscriptionUsageRevenue
           total_subscription_usage_revenue: subscriptionPaymentRevenue,
           total_platform_fee_revenue: platformFeeRevenue,
-          total_payment_volume: parseFloat(platformFeeResult.rows[0]?.total_payment_amount || 0),
+          //total_payment_volume: parseFloat(platformFeeResult.rows[0]?.total_payment_amount || 0),
+          total_payment_volume: parseFloat(platformFeeResult.rows[0]?.total_payment_amount || 0) + subscriptionPaymentRevenue,
           total_net_to_creators: parseFloat(platformFeeResult.rows[0]?.total_net_amount || 0),
           total_processing_fees: parseFloat(platformFeeResult.rows[0]?.total_stripe_fees || 0) + parseFloat(platformFeeResult.rows[0]?.total_paddle_fees || 0),
           platform_fee_this_period: platformFeePeriod,
