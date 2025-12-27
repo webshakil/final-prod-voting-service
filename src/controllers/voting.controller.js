@@ -21,6 +21,10 @@ import {
 // ========================================
 // GET BALLOT
 // ========================================
+// GET BALLOT - FIXED VERSION
+// ========================================
+// Replace your existing getBallot function with this one
+
 export const getBallot = async (req, res) => {
   try {
     const { electionId } = req.params;
@@ -44,7 +48,7 @@ export const getBallot = async (req, res) => {
 
     const election = electionResult.rows[0];
 
-    //  FIX: Handle date/time properly with PostgreSQL timestamp format
+    // Handle date/time properly with PostgreSQL timestamp format
     const now = new Date();
     let startDateTime, endDateTime;
     
@@ -56,7 +60,6 @@ export const getBallot = async (req, res) => {
           startDateTime.setHours(parseInt(hours), parseInt(minutes), parseInt(seconds || 0));
         }
       } else {
-        // Fallback for string dates
         const startTime = election.start_time || '00:00:00';
         startDateTime = new Date(`${election.start_date}T${startTime}`);
       }
@@ -68,12 +71,10 @@ export const getBallot = async (req, res) => {
           endDateTime.setHours(parseInt(hours), parseInt(minutes), parseInt(seconds || 0));
         }
       } else {
-        // Fallback for string dates
         const endTime = election.end_time || '23:59:59';
         endDateTime = new Date(`${election.end_date}T${endTime}`);
       }
       
-      // Validate dates
       if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
         throw new Error('Invalid date format');
       }
@@ -85,7 +86,7 @@ export const getBallot = async (req, res) => {
       });
     }
 
-    // ✅ Check status is 'published' or 'active'
+    // Check status is 'published' or 'active'
     const allowedStatuses = ['published', 'active'];
     
     if (!allowedStatuses.includes(election.status)) {
@@ -96,7 +97,7 @@ export const getBallot = async (req, res) => {
       });
     }
 
-    // ✅ Check date range
+    // Check date range
     if (now < startDateTime) {
       return res.status(400).json({ 
         error: 'Election has not started yet',
@@ -115,7 +116,7 @@ export const getBallot = async (req, res) => {
 
     console.log('✅ Election is active and within date range');
 
-    //  FIXED: Get questions from YOUR tables (votteryy_election_questions)
+    // Get questions
     const questionsResult = await pool.query(
       `SELECT 
         q.*,
@@ -146,30 +147,31 @@ export const getBallot = async (req, res) => {
       });
     }
 
-    // Check if user has already voted
-    // const voteCheck = await pool.query(
-    //   `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
-    //    WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-    //   [electionId, userId]
-    // );
+    // ✅ FIXED: Check if user has already voted (BOTH normal votes AND anonymous via participation)
+    const voteCheck = await pool.query(
+      `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
+       WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
+      [electionId, userId]
+    );
 
-    // const hasVoted = voteCheck.rows.length > 0;
+    // ✅ NEW: Also check participation table (covers anonymous votes)
+    const participationCheck = await pool.query(
+      `SELECT id, has_voted FROM votteryyy_voter_participation 
+       WHERE election_id = $1 AND user_id = $2 AND has_voted = true`,
+      [electionId, String(userId)]
+    );
 
-    // Check if user has already voted (BOTH normal votes AND anonymous via participation)
-const voteCheck = await pool.query(
-  `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
-   WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-  [electionId, userId]
-);
+    // ✅ FIXED: Store normal vote data safely
+    const normalVote = voteCheck.rows.length > 0 ? voteCheck.rows[0] : null;
+    
+    // ✅ FIXED: hasVoted is true if EITHER normal vote exists OR participation record exists
+    const hasVoted = normalVote !== null || participationCheck.rows.length > 0;
 
-// Also check participation table (covers anonymous votes)
-const participationCheck = await pool.query(
-  `SELECT id, has_voted FROM votteryyy_voter_participation 
-   WHERE election_id = $1 AND user_id = $2 AND has_voted = true`,
-  [electionId, String(userId)]
-);
-
-const hasVoted = voteCheck.rows.length > 0 || participationCheck.rows.length > 0;
+    console.log('🔍 Vote check:', { 
+      normalVoteFound: normalVote !== null, 
+      participationFound: participationCheck.rows.length > 0,
+      hasVoted 
+    });
 
     // Get video watch progress if video is required
     let videoProgress = null;
@@ -212,9 +214,10 @@ const hasVoted = voteCheck.rows.length > 0 || participationCheck.rows.length > 0
       votingType: election.voting_type || 'plurality',
       questions: questionsResult.rows,
       hasVoted,
-      votingId: hasVoted ? voteCheck.rows[0].voting_id : null,
-      voteHash: hasVoted ? voteCheck.rows[0].vote_hash : null,
-      receiptId: hasVoted ? voteCheck.rows[0].receipt_id : null,
+      // ✅ FIXED: Safely access normalVote properties
+      votingId: normalVote?.voting_id || null,
+      voteHash: normalVote?.vote_hash || null,
+      receiptId: normalVote?.receipt_id || null,
       voteEditingAllowed: election.vote_editing_allowed || false,
       anonymousVotingEnabled: election.anonymous_voting_enabled || false,
       liveResults: election.show_live_results || false,
@@ -242,6 +245,227 @@ const hasVoted = voteCheck.rows.length > 0 || participationCheck.rows.length > 0
     });
   }
 };
+// export const getBallot = async (req, res) => {
+//   try {
+//     const { electionId } = req.params;
+//     const userId = req.user?.userId || req.headers['x-user-id'];
+
+//     console.log('🗳️ Getting ballot for election:', electionId, 'user:', userId);
+
+//     if (!userId) {
+//       return res.status(401).json({ error: 'Authentication required' });
+//     }
+
+//     // Get election details
+//     const electionResult = await pool.query(
+//       `SELECT * FROM votteryyy_elections WHERE id = $1`,
+//       [electionId]
+//     );
+
+//     if (electionResult.rows.length === 0) {
+//       return res.status(404).json({ error: 'Election not found' });
+//     }
+
+//     const election = electionResult.rows[0];
+
+//     //  FIX: Handle date/time properly with PostgreSQL timestamp format
+//     const now = new Date();
+//     let startDateTime, endDateTime;
+    
+//     try {
+//       if (election.start_date instanceof Date) {
+//         startDateTime = new Date(election.start_date);
+//         if (election.start_time) {
+//           const [hours, minutes, seconds] = election.start_time.split(':');
+//           startDateTime.setHours(parseInt(hours), parseInt(minutes), parseInt(seconds || 0));
+//         }
+//       } else {
+//         // Fallback for string dates
+//         const startTime = election.start_time || '00:00:00';
+//         startDateTime = new Date(`${election.start_date}T${startTime}`);
+//       }
+
+//       if (election.end_date instanceof Date) {
+//         endDateTime = new Date(election.end_date);
+//         if (election.end_time) {
+//           const [hours, minutes, seconds] = election.end_time.split(':');
+//           endDateTime.setHours(parseInt(hours), parseInt(minutes), parseInt(seconds || 0));
+//         }
+//       } else {
+//         // Fallback for string dates
+//         const endTime = election.end_time || '23:59:59';
+//         endDateTime = new Date(`${election.end_date}T${endTime}`);
+//       }
+      
+//       // Validate dates
+//       if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
+//         throw new Error('Invalid date format');
+//       }
+//     } catch (dateError) {
+//       console.error('❌ Date parsing error:', dateError);
+//       return res.status(500).json({ 
+//         error: 'Invalid election dates',
+//         details: 'The election has invalid date configuration'
+//       });
+//     }
+
+//     // ✅ Check status is 'published' or 'active'
+//     const allowedStatuses = ['published', 'active'];
+    
+//     if (!allowedStatuses.includes(election.status)) {
+//       return res.status(400).json({ 
+//         error: 'Election is not currently active',
+//         status: election.status,
+//         message: `Election status is "${election.status}". Must be "published" or "active".`
+//       });
+//     }
+
+//     // ✅ Check date range
+//     if (now < startDateTime) {
+//       return res.status(400).json({ 
+//         error: 'Election has not started yet',
+//         startDate: startDateTime.toISOString(),
+//         message: `Election starts on ${startDateTime.toLocaleString()}`
+//       });
+//     }
+
+//     if (now > endDateTime) {
+//       return res.status(400).json({ 
+//         error: 'Election has ended',
+//         endDate: endDateTime.toISOString(),
+//         message: `Election ended on ${endDateTime.toLocaleString()}`
+//       });
+//     }
+
+//     console.log('✅ Election is active and within date range');
+
+//     //  FIXED: Get questions from YOUR tables (votteryy_election_questions)
+//     const questionsResult = await pool.query(
+//       `SELECT 
+//         q.*,
+//         COALESCE(
+//           json_agg(
+//             json_build_object(
+//               'id', o.id,
+//               'option_text', o.option_text,
+//               'option_image_url', o.option_image_url,
+//               'option_order', o.option_order
+//             )
+//             ORDER BY o.option_order
+//           ) FILTER (WHERE o.id IS NOT NULL),
+//           '[]'
+//         ) as options
+//        FROM votteryy_election_questions q
+//        LEFT JOIN votteryy_election_options o ON q.id = o.question_id
+//        WHERE q.election_id = $1
+//        GROUP BY q.id
+//        ORDER BY q.id`,
+//       [electionId]
+//     );
+
+//     if (questionsResult.rows.length === 0) {
+//       return res.status(400).json({ 
+//         error: 'No questions found for this election',
+//         message: 'The election ballot has not been configured yet.'
+//       });
+//     }
+
+//     // Check if user has already voted
+//     // const voteCheck = await pool.query(
+//     //   `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
+//     //    WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
+//     //   [electionId, userId]
+//     // );
+
+//     // const hasVoted = voteCheck.rows.length > 0;
+
+//     // Check if user has already voted (BOTH normal votes AND anonymous via participation)
+// const voteCheck = await pool.query(
+//   `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
+//    WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
+//   [electionId, userId]
+// );
+
+// // Also check participation table (covers anonymous votes)
+// const participationCheck = await pool.query(
+//   `SELECT id, has_voted FROM votteryyy_voter_participation 
+//    WHERE election_id = $1 AND user_id = $2 AND has_voted = true`,
+//   [electionId, String(userId)]
+// );
+
+// const hasVoted = voteCheck.rows.length > 0 || participationCheck.rows.length > 0;
+
+//     // Get video watch progress if video is required
+//     let videoProgress = null;
+//     if (election.video_watch_required) {
+//       const videoResult = await pool.query(
+//         `SELECT completed, watch_percentage FROM votteryy_video_watch_progress
+//          WHERE user_id = $1 AND election_id = $2`,
+//         [userId, electionId]
+//       );
+//       videoProgress = videoResult.rows[0] || { completed: false, watch_percentage: 0 };
+//     }
+
+//     // Format dates for response
+//     const formatDate = (date) => {
+//       if (date instanceof Date) {
+//         return date.toISOString().split('T')[0];
+//       }
+//       return date;
+//     };
+
+//     const formatTime = (time) => {
+//       if (!time) return null;
+//       if (typeof time === 'string') return time;
+//       return time.toString();
+//     };
+
+//     // Prepare ballot response
+//     const ballot = {
+//       election: {
+//         id: election.id,
+//         title: election.title,
+//         description: election.description,
+//         startDate: formatDate(election.start_date),
+//         startTime: formatTime(election.start_time),
+//         endDate: formatDate(election.end_date),
+//         endTime: formatTime(election.end_time),
+//         status: election.status,
+//         videoUrl: election.topic_video_url || election.video_url,
+//       },
+//       votingType: election.voting_type || 'plurality',
+//       questions: questionsResult.rows,
+//       hasVoted,
+//       votingId: hasVoted ? voteCheck.rows[0].voting_id : null,
+//       voteHash: hasVoted ? voteCheck.rows[0].vote_hash : null,
+//       receiptId: hasVoted ? voteCheck.rows[0].receipt_id : null,
+//       voteEditingAllowed: election.vote_editing_allowed || false,
+//       anonymousVotingEnabled: election.anonymous_voting_enabled || false,
+//       liveResults: election.show_live_results || false,
+//       videoWatchRequired: election.video_watch_required || false,
+//       videoProgress: videoProgress,
+//       minimumWatchPercentage: parseFloat(election.minimum_watch_percentage) || 0,
+//       lotteryEnabled: election.lottery_enabled || false,
+//       paymentRequired: !election.is_free,
+//       participationFee: parseFloat(election.general_participation_fee) || 0,
+//     };
+
+//     console.log('✅ Ballot prepared:', {
+//       questionCount: ballot.questions.length,
+//       hasVoted,
+//       votingType: ballot.votingType,
+//     });
+
+//     res.json(ballot);
+
+//   } catch (error) {
+//     console.error('❌ Get ballot error:', error);
+//     res.status(500).json({ 
+//       error: 'Failed to get ballot',
+//       details: process.env.NODE_ENV === 'development' ? error.message : undefined
+//     });
+//   }
+// };
 
 // ========================================
 // GET LIVE RESULTS - FIXED VERSION (ONLY ONE)
