@@ -103,6 +103,7 @@ app.use('/api/verification', verificationRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/admin/analytics-api-keys', analyticsApiKeyRoutes);
+app.use('/api/voting', voteRoutes);
 
 // 404 handler
 app.use((req, res) => {
