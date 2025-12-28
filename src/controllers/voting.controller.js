@@ -31,6 +31,7 @@ export const getBallot = async (req, res) => {
     const userId = req.user?.userId || req.headers['x-user-id'];
 
     console.log('🗳️ Getting ballot for election:', electionId, 'user:', userId);
+    console.log('🔍 DEBUG userId type:', typeof userId, 'value:', userId);
 
     if (!userId) {
       return res.status(401).json({ error: 'Authentication required' });
@@ -147,27 +148,36 @@ export const getBallot = async (req, res) => {
       });
     }
 
-    // ✅ FIXED: Check if user has already voted (BOTH normal votes AND anonymous via participation)
+    // ✅ Check normal votes
+    console.log('🔍 DEBUG: Checking normal votes for user:', userId, 'election:', electionId);
     const voteCheck = await pool.query(
       `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
        WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-      [electionId, userId]
+      [electionId, String(userId)]
     );
+    console.log('🔍 DEBUG normal votes result:', voteCheck.rows);
 
-    // ✅ NEW: Also check participation table (covers anonymous votes)
+    // ✅ Check participation table (covers anonymous votes)
+    console.log('🔍 DEBUG: Checking participation for user:', String(userId), 'election:', electionId);
     const participationCheck = await pool.query(
-      `SELECT id, has_voted FROM votteryyy_voter_participation 
+      `SELECT id, has_voted, voting_session_id FROM votteryyy_voter_participation 
        WHERE election_id = $1 AND user_id = $2 AND has_voted = true`,
       [electionId, String(userId)]
     );
+    
+    console.log('🔍 DEBUG participation check:', {
+      query: `election_id = ${electionId} AND user_id = '${String(userId)}'`,
+      rowCount: participationCheck.rows.length,
+      result: participationCheck.rows
+    });
 
-    // ✅ FIXED: Store normal vote data safely
+    // ✅ Store normal vote data safely
     const normalVote = voteCheck.rows.length > 0 ? voteCheck.rows[0] : null;
     
-    // ✅ FIXED: hasVoted is true if EITHER normal vote exists OR participation record exists
+    // ✅ hasVoted is true if EITHER normal vote exists OR participation record exists
     const hasVoted = normalVote !== null || participationCheck.rows.length > 0;
 
-    console.log('🔍 Vote check:', { 
+    console.log('🔍 Vote check FINAL:', { 
       normalVoteFound: normalVote !== null, 
       participationFound: participationCheck.rows.length > 0,
       hasVoted 
@@ -214,7 +224,7 @@ export const getBallot = async (req, res) => {
       votingType: election.voting_type || 'plurality',
       questions: questionsResult.rows,
       hasVoted,
-      // ✅ FIXED: Safely access normalVote properties
+      // ✅ Safely access normalVote properties
       votingId: normalVote?.voting_id || null,
       voteHash: normalVote?.vote_hash || null,
       receiptId: normalVote?.receipt_id || null,
@@ -231,7 +241,7 @@ export const getBallot = async (req, res) => {
 
     console.log('✅ Ballot prepared:', {
       questionCount: ballot.questions.length,
-      hasVoted,
+      hasVoted: ballot.hasVoted,
       votingType: ballot.votingType,
     });
 
@@ -245,6 +255,7 @@ export const getBallot = async (req, res) => {
     });
   }
 };
+
 // export const getBallot = async (req, res) => {
 //   try {
 //     const { electionId } = req.params;
