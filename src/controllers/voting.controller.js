@@ -1,4 +1,3 @@
-//last working code
 import pool from '../config/database.js';
 import crypto from 'crypto';
 import { 
@@ -148,51 +147,22 @@ export const getBallot = async (req, res) => {
       });
     }
 
-<<<<<<< HEAD
-    // ✅ Check normal votes
-    console.log('🔍 DEBUG: Checking normal votes for user:', userId, 'election:', electionId);
-    const voteCheck = await pool.query(
-      `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
-       WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-=======
+
     // Check if user has already voted
    // Check if user has already voted (checks BOTH normal and anonymous via participation table)
-    const participationCheck = await pool.query(
+ 
+
+
+    // ✅ Check participation table (covers anonymous votes)
+const participationCheck = await pool.query(
       `SELECT has_voted, voting_session_id FROM votteryyy_voter_participation 
        WHERE election_id = $1 AND user_id = $2`,
->>>>>>> 66c127f (you have voted will be checked from both tables)
       [electionId, String(userId)]
     );
-    console.log('🔍 DEBUG normal votes result:', voteCheck.rows);
 
-<<<<<<< HEAD
-    // ✅ Check participation table (covers anonymous votes)
-    console.log('🔍 DEBUG: Checking participation for user:', String(userId), 'election:', electionId);
-    const participationCheck = await pool.query(
-      `SELECT id, has_voted, voting_session_id FROM votteryyy_voter_participation 
-       WHERE election_id = $1 AND user_id = $2 AND has_voted = true`,
-      [electionId, String(userId)]
-    );
-    
-    console.log('🔍 DEBUG participation check:', {
-      query: `election_id = ${electionId} AND user_id = '${String(userId)}'`,
-      rowCount: participationCheck.rows.length,
-      result: participationCheck.rows
-    });
-
-    // ✅ Store normal vote data safely
-    const normalVote = voteCheck.rows.length > 0 ? voteCheck.rows[0] : null;
-    
-    // ✅ hasVoted is true if EITHER normal vote exists OR participation record exists
-    const hasVoted = normalVote !== null || participationCheck.rows.length > 0;
-
-    console.log('🔍 Vote check FINAL:', { 
-      normalVoteFound: normalVote !== null, 
-      participationFound: participationCheck.rows.length > 0,
-      hasVoted 
-    });
-=======
     const hasVoted = participationCheck.rows.length > 0 && participationCheck.rows[0].has_voted === true;
+
+ 
 
     // Get vote details if user has voted (for receipt/hash info)
     let voteDetails = null;
@@ -215,7 +185,7 @@ export const getBallot = async (req, res) => {
         voteDetails = normalVote.rows[0] || null;
       }
     }
->>>>>>> 66c127f (you have voted will be checked from both tables)
+
 
     // Get video watch progress if video is required
     let videoProgress = null;
@@ -258,16 +228,11 @@ export const getBallot = async (req, res) => {
       votingType: election.voting_type || 'plurality',
       questions: questionsResult.rows,
       hasVoted,
-<<<<<<< HEAD
-      // ✅ Safely access normalVote properties
-      votingId: normalVote?.voting_id || null,
-      voteHash: normalVote?.vote_hash || null,
-      receiptId: normalVote?.receipt_id || null,
-=======
+
       votingId: voteDetails?.voting_id || null,
       voteHash: voteDetails?.vote_hash || null,
       receiptId: voteDetails?.receipt_id || null,
->>>>>>> 66c127f (you have voted will be checked from both tables)
+
       voteEditingAllowed: election.vote_editing_allowed || false,
       anonymousVotingEnabled: election.anonymous_voting_enabled || false,
       liveResults: election.show_live_results || false,
@@ -296,227 +261,7 @@ export const getBallot = async (req, res) => {
   }
 };
 
-// export const getBallot = async (req, res) => {
-//   try {
-//     const { electionId } = req.params;
-//     const userId = req.user?.userId || req.headers['x-user-id'];
 
-//     console.log('🗳️ Getting ballot for election:', electionId, 'user:', userId);
-
-//     if (!userId) {
-//       return res.status(401).json({ error: 'Authentication required' });
-//     }
-
-//     // Get election details
-//     const electionResult = await pool.query(
-//       `SELECT * FROM votteryyy_elections WHERE id = $1`,
-//       [electionId]
-//     );
-
-//     if (electionResult.rows.length === 0) {
-//       return res.status(404).json({ error: 'Election not found' });
-//     }
-
-//     const election = electionResult.rows[0];
-
-//     //  FIX: Handle date/time properly with PostgreSQL timestamp format
-//     const now = new Date();
-//     let startDateTime, endDateTime;
-    
-//     try {
-//       if (election.start_date instanceof Date) {
-//         startDateTime = new Date(election.start_date);
-//         if (election.start_time) {
-//           const [hours, minutes, seconds] = election.start_time.split(':');
-//           startDateTime.setHours(parseInt(hours), parseInt(minutes), parseInt(seconds || 0));
-//         }
-//       } else {
-//         // Fallback for string dates
-//         const startTime = election.start_time || '00:00:00';
-//         startDateTime = new Date(`${election.start_date}T${startTime}`);
-//       }
-
-//       if (election.end_date instanceof Date) {
-//         endDateTime = new Date(election.end_date);
-//         if (election.end_time) {
-//           const [hours, minutes, seconds] = election.end_time.split(':');
-//           endDateTime.setHours(parseInt(hours), parseInt(minutes), parseInt(seconds || 0));
-//         }
-//       } else {
-//         // Fallback for string dates
-//         const endTime = election.end_time || '23:59:59';
-//         endDateTime = new Date(`${election.end_date}T${endTime}`);
-//       }
-      
-//       // Validate dates
-//       if (isNaN(startDateTime.getTime()) || isNaN(endDateTime.getTime())) {
-//         throw new Error('Invalid date format');
-//       }
-//     } catch (dateError) {
-//       console.error('❌ Date parsing error:', dateError);
-//       return res.status(500).json({ 
-//         error: 'Invalid election dates',
-//         details: 'The election has invalid date configuration'
-//       });
-//     }
-
-//     // ✅ Check status is 'published' or 'active'
-//     const allowedStatuses = ['published', 'active'];
-    
-//     if (!allowedStatuses.includes(election.status)) {
-//       return res.status(400).json({ 
-//         error: 'Election is not currently active',
-//         status: election.status,
-//         message: `Election status is "${election.status}". Must be "published" or "active".`
-//       });
-//     }
-
-//     // ✅ Check date range
-//     if (now < startDateTime) {
-//       return res.status(400).json({ 
-//         error: 'Election has not started yet',
-//         startDate: startDateTime.toISOString(),
-//         message: `Election starts on ${startDateTime.toLocaleString()}`
-//       });
-//     }
-
-//     if (now > endDateTime) {
-//       return res.status(400).json({ 
-//         error: 'Election has ended',
-//         endDate: endDateTime.toISOString(),
-//         message: `Election ended on ${endDateTime.toLocaleString()}`
-//       });
-//     }
-
-//     console.log('✅ Election is active and within date range');
-
-//     //  FIXED: Get questions from YOUR tables (votteryy_election_questions)
-//     const questionsResult = await pool.query(
-//       `SELECT 
-//         q.*,
-//         COALESCE(
-//           json_agg(
-//             json_build_object(
-//               'id', o.id,
-//               'option_text', o.option_text,
-//               'option_image_url', o.option_image_url,
-//               'option_order', o.option_order
-//             )
-//             ORDER BY o.option_order
-//           ) FILTER (WHERE o.id IS NOT NULL),
-//           '[]'
-//         ) as options
-//        FROM votteryy_election_questions q
-//        LEFT JOIN votteryy_election_options o ON q.id = o.question_id
-//        WHERE q.election_id = $1
-//        GROUP BY q.id
-//        ORDER BY q.id`,
-//       [electionId]
-//     );
-
-//     if (questionsResult.rows.length === 0) {
-//       return res.status(400).json({ 
-//         error: 'No questions found for this election',
-//         message: 'The election ballot has not been configured yet.'
-//       });
-//     }
-
-//     // Check if user has already voted
-//     // const voteCheck = await pool.query(
-//     //   `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
-//     //    WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-//     //   [electionId, userId]
-//     // );
-
-//     // const hasVoted = voteCheck.rows.length > 0;
-
-//     // Check if user has already voted (BOTH normal votes AND anonymous via participation)
-// const voteCheck = await pool.query(
-//   `SELECT id, voting_id, vote_hash, receipt_id FROM votteryy_votes 
-//    WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
-//   [electionId, userId]
-// );
-
-// // Also check participation table (covers anonymous votes)
-// const participationCheck = await pool.query(
-//   `SELECT id, has_voted FROM votteryyy_voter_participation 
-//    WHERE election_id = $1 AND user_id = $2 AND has_voted = true`,
-//   [electionId, String(userId)]
-// );
-
-// const hasVoted = voteCheck.rows.length > 0 || participationCheck.rows.length > 0;
-
-//     // Get video watch progress if video is required
-//     let videoProgress = null;
-//     if (election.video_watch_required) {
-//       const videoResult = await pool.query(
-//         `SELECT completed, watch_percentage FROM votteryy_video_watch_progress
-//          WHERE user_id = $1 AND election_id = $2`,
-//         [userId, electionId]
-//       );
-//       videoProgress = videoResult.rows[0] || { completed: false, watch_percentage: 0 };
-//     }
-
-//     // Format dates for response
-//     const formatDate = (date) => {
-//       if (date instanceof Date) {
-//         return date.toISOString().split('T')[0];
-//       }
-//       return date;
-//     };
-
-//     const formatTime = (time) => {
-//       if (!time) return null;
-//       if (typeof time === 'string') return time;
-//       return time.toString();
-//     };
-
-//     // Prepare ballot response
-//     const ballot = {
-//       election: {
-//         id: election.id,
-//         title: election.title,
-//         description: election.description,
-//         startDate: formatDate(election.start_date),
-//         startTime: formatTime(election.start_time),
-//         endDate: formatDate(election.end_date),
-//         endTime: formatTime(election.end_time),
-//         status: election.status,
-//         videoUrl: election.topic_video_url || election.video_url,
-//       },
-//       votingType: election.voting_type || 'plurality',
-//       questions: questionsResult.rows,
-//       hasVoted,
-//       votingId: hasVoted ? voteCheck.rows[0].voting_id : null,
-//       voteHash: hasVoted ? voteCheck.rows[0].vote_hash : null,
-//       receiptId: hasVoted ? voteCheck.rows[0].receipt_id : null,
-//       voteEditingAllowed: election.vote_editing_allowed || false,
-//       anonymousVotingEnabled: election.anonymous_voting_enabled || false,
-//       liveResults: election.show_live_results || false,
-//       videoWatchRequired: election.video_watch_required || false,
-//       videoProgress: videoProgress,
-//       minimumWatchPercentage: parseFloat(election.minimum_watch_percentage) || 0,
-//       lotteryEnabled: election.lottery_enabled || false,
-//       paymentRequired: !election.is_free,
-//       participationFee: parseFloat(election.general_participation_fee) || 0,
-//     };
-
-//     console.log('✅ Ballot prepared:', {
-//       questionCount: ballot.questions.length,
-//       hasVoted,
-//       votingType: ballot.votingType,
-//     });
-
-//     res.json(ballot);
-
-//   } catch (error) {
-//     console.error('❌ Get ballot error:', error);
-//     res.status(500).json({ 
-//       error: 'Failed to get ballot',
-//       details: process.env.NODE_ENV === 'development' ? error.message : undefined
-//     });
-//   }
-// };
 
 // ========================================
 // GET LIVE RESULTS - FIXED VERSION (ONLY ONE)
@@ -1112,14 +857,24 @@ export const castVote = async (req, res) => {
       // ========================================
       console.log('📊 Processing NORMAL vote');
 
-      // Check if already voted
-      const existingVote = await client.query(
-        `SELECT id, voting_id FROM votteryy_votes 
-         WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
+      // ✅ FIXED: Check participation table to cover BOTH normal and anonymous votes
+      const participationCheck = await client.query(
+        `SELECT has_voted, voting_session_id FROM votteryyy_voter_participation 
+         WHERE election_id = $1 AND user_id = $2`,
         [electionId, String(userId)]
       );
 
-      const hasVotedBefore = existingVote.rows.length > 0;
+      const hasVotedBefore = participationCheck.rows.length > 0 && participationCheck.rows[0].has_voted === true;
+
+      // Get existing vote details if needed for editing
+      let existingVote = { rows: [] };
+      if (hasVotedBefore) {
+        existingVote = await client.query(
+          `SELECT id, voting_id FROM votteryy_votes 
+           WHERE election_id = $1 AND user_id = $2 AND status = 'valid'`,
+          [electionId, String(userId)]
+        );
+      }
 
       // ✅ REQUIREMENT 3: If NOT allowed to edit and already voted, mark for audit
       if (hasVotedBefore && !voteEditingAllowed) {
@@ -1133,7 +888,7 @@ export const castVote = async (req, res) => {
           [
             electionId,
             String(userId),
-            existingVote.rows[0].voting_id,
+            existingVote.rows[0]?.voting_id || null,
             JSON.stringify(answers),
             req.ip || req.connection.remoteAddress,
             req.headers['user-agent']
@@ -1166,7 +921,7 @@ export const castVote = async (req, res) => {
 
       let voteId, votingUuid;
       
-      if (hasVotedBefore) {
+      if (hasVotedBefore && existingVote.rows.length > 0) {
         // ✅ REQUIREMENT 2: Edit allowed - UPDATE existing vote
         console.log(`📝 Updating normal vote: ${existingVote.rows[0].id}`);
 
@@ -1185,6 +940,14 @@ export const castVote = async (req, res) => {
         
         voteId = updateResult.rows[0].id;
         votingUuid = updateResult.rows[0].voting_id;
+
+        // Update participation timestamp
+        await client.query(
+          `UPDATE votteryyy_voter_participation 
+           SET voted_at = NOW() 
+           WHERE election_id = $1 AND user_id = $2`,
+          [electionId, String(userId)]
+        );
         
         console.log(`✅ Vote UPDATED: ${voteId}`);
         
@@ -1213,6 +976,14 @@ export const castVote = async (req, res) => {
         
         voteId = voteResult.rows[0].id;
         votingUuid = voteResult.rows[0].voting_id;
+
+        // ✅ FIXED: Record participation for normal votes too
+        await client.query(
+          `INSERT INTO votteryyy_voter_participation (election_id, user_id, has_voted)
+           VALUES ($1, $2, TRUE)
+           ON CONFLICT (election_id, user_id) DO UPDATE SET has_voted = TRUE, voted_at = NOW()`,
+          [electionId, String(userId)]
+        );
 
         // Create receipt
         await client.query(
@@ -2120,8 +1891,7 @@ export default {
   getVoteAuditLogs,
   getPublicBulletin
 };
-<<<<<<< HEAD
-=======
+
 //last workbale code.only to check user already voted by checking every tables
 // import pool from '../config/database.js';
 // import crypto from 'crypto';
@@ -3953,6 +3723,11 @@ export default {
 //   getVoteAuditLogs,
 //   getPublicBulletin
 // };
+
+
+
+
+
 //this is last workable codes just to add socket.io above code
 // import pool from '../config/database.js';
 // import crypto from 'crypto';
@@ -3965,7 +3740,7 @@ export default {
 // } from '../services/encryption.service.js';
 // import AuditService from '../services/audit.service.js';
 // import NotificationService from '../services/notification.service.js';
->>>>>>> 66c127f (you have voted will be checked from both tables)
+
 
 
 
