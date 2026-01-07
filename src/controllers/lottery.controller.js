@@ -256,6 +256,92 @@ async getLotteryInfo(req, res) {
 }
 
 
+// =====================================================
+// ADD THIS METHOD TO lottery.controller.js
+// Place it after getLotteryInfo method (around line 180)
+// =====================================================
+
+  // ✅ NEW: PUBLIC ENDPOINT - Get ball numbers for slot machine display
+  // Returns ONLY ball numbers and count - NO sensitive user data
+  async getPublicBallNumbers(req, res) {
+    try {
+      const { electionId } = req.params;
+
+      console.log(`🎰 Getting public ball numbers for election ${electionId}`);
+
+      // First verify election exists and has lottery enabled
+      const electionResult = await pool.query(
+        `SELECT id, lottery_enabled, lottery_winner_count, end_date, end_time, status
+         FROM votteryyy_elections WHERE id = $1`,
+        [electionId]
+      );
+
+      if (electionResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Election not found' });
+      }
+
+      const election = electionResult.rows[0];
+
+      if (!election.lottery_enabled) {
+        return res.json({
+          lotteryEnabled: false,
+          lottery_enabled: false,
+          ballNumbers: [],
+          ball_numbers: [],
+          totalParticipants: 0,
+          total_participants: 0,
+        });
+      }
+
+      // Get ONLY ball numbers - no user IDs or sensitive data
+      const result = await pool.query(
+        `SELECT ball_number, created_at
+         FROM votteryy_lottery_tickets
+         WHERE election_id = $1
+         ORDER BY created_at ASC`,
+        [electionId]
+      );
+
+      const ballNumbers = result.rows.map(r => r.ball_number);
+      const totalParticipants = ballNumbers.length;
+
+      // Check if election has ended
+      const now = new Date();
+      const endDateTime = new Date(`${election.end_date}T${election.end_time || '23:59:59'}`);
+      const isElectionEnded = now >= endDateTime || election.status === 'completed';
+
+      // Check if draw has happened
+      const drawResult = await pool.query(
+        `SELECT draw_id FROM votteryy_lottery_draws WHERE election_id = $1`,
+        [electionId]
+      );
+      const hasBeenDrawn = drawResult.rows.length > 0;
+
+      console.log(`🎰 Election ${electionId}: ${totalParticipants} participants, ended: ${isElectionEnded}, drawn: ${hasBeenDrawn}`);
+
+      res.json({
+        success: true,
+        lotteryEnabled: true,
+        lottery_enabled: true,
+        ballNumbers,
+        ball_numbers: ballNumbers,
+        totalParticipants,
+        total_participants: totalParticipants,
+        luckyVotersCount: election.lottery_winner_count || 1,
+        lucky_voters_count: election.lottery_winner_count || 1,
+        isElectionEnded,
+        is_election_ended: isElectionEnded,
+        hasBeenDrawn,
+        has_been_drawn: hasBeenDrawn,
+      });
+
+    } catch (error) {
+      console.error('❌ Get public ball numbers error:', error);
+      res.status(500).json({ error: 'Failed to retrieve ball numbers' });
+    }
+  }
+
+
   // GET PUBLIC WINNERS ANNOUNCEMENT
   async getWinnersAnnouncement(req, res) {
     try {
@@ -759,129 +845,7 @@ async getLotteryInfo(req, res) {
     client.release();
   }
 }
-  // async approveDisbursement(req, res) {
-  //   const client = await pool.connect();
-  //   try {
-  //     await client.query('BEGIN');
 
-  //     const { winnerId } = req.params;
-  //     const adminId = req.user.userId;
-  //     //const adminRoles = req.user.roles || [];
-  //     const adminRoles = (req.user.roles || []).map(r => typeof r === 'string' ? r.toLowerCase() : r);
-  //     const { notes } = req.body;
-
-  //     console.log(`✅ Approve disbursement: winnerId=${winnerId}, adminId=${adminId}`);
-
-  //     const winnerResult = await client.query(
-  //       `SELECT lw.*, e.title as election_title
-  //        FROM votteryy_lottery_winners lw
-  //        JOIN votteryyy_elections e ON lw.election_id = e.id
-  //        WHERE lw.winner_id = $1`,
-  //       [winnerId]
-  //     );
-
-  //     if (winnerResult.rows.length === 0) {
-  //       await client.query('ROLLBACK');
-  //       return res.status(404).json({ error: 'Winner record not found' });
-  //     }
-
-  //     const winner = winnerResult.rows[0];
-  //     const prizeAmount = parseFloat(winner.prize_amount || 0);
-
-  //     if (winner.disbursement_status === 'pending_senior_approval') {
-  //       if (!adminRoles.includes('manager')) {
-  //         await client.query('ROLLBACK');
-  //         return res.status(403).json({ 
-  //           error: 'This disbursement requires Manager approval due to large amount',
-  //           required_role: 'manager',
-  //           prize_amount: prizeAmount
-  //         });
-  //       }
-  //     }
-
-  //     if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
-  //       await client.query('ROLLBACK');
-  //       return res.status(400).json({ 
-  //         error: `Cannot approve disbursement with status: ${winner.disbursement_status}` 
-  //       });
-  //     }
-
-  //     await client.query(
-  //       `INSERT INTO votteryy_user_wallets (user_id, balance, blocked_balance, currency)
-  //        VALUES ($1, $2, 0, '${DISBURSEMENT_CONFIG.CURRENCY}')
-  //        ON CONFLICT (user_id)
-  //        DO UPDATE SET balance = votteryy_user_wallets.balance + $2, updated_at = CURRENT_TIMESTAMP`,
-  //       [winner.user_id, prizeAmount]
-  //     );
-
-  //     await client.query(
-  //       `INSERT INTO votteryy_wallet_transactions
-  //        (user_id, transaction_type, amount, election_id, status, description, metadata)
-  //        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-  //       [
-  //         winner.user_id,
-  //         'prize_won',
-  //         prizeAmount,
-  //         winner.election_id,
-  //         'success',
-  //         `Lottery Prize Rank #${winner.rank} - ${winner.election_title} (Admin Approved)`,
-  //         JSON.stringify({ winner_id: winnerId, approved_by: adminId, notes })
-  //       ]
-  //     );
-
-  //     await client.query(
-  //       `UPDATE votteryy_lottery_winners
-  //        SET disbursement_status = 'disbursed', disbursed_at = CURRENT_TIMESTAMP,
-  //            admin_approved_by = $2, admin_approved_at = CURRENT_TIMESTAMP, admin_notes = $3
-  //        WHERE winner_id = $1`,
-  //       [winnerId, adminId, notes]
-  //     );
-
-  //     await client.query(
-  //       `INSERT INTO votteryy_audit_logs 
-  //        (action, entity_type, entity_id, user_id, details)
-  //        VALUES ($1, $2, $3, $4, $5)`,
-  //       [
-  //         'PRIZE_DISBURSEMENT_APPROVED',
-  //         'lottery_winner',
-  //         winnerId,
-  //         adminId,
-  //         JSON.stringify({
-  //           winner_user_id: winner.user_id,
-  //           prize_amount: prizeAmount,
-  //           election_id: winner.election_id,
-  //           notes
-  //         })
-  //       ]
-  //     );
-
-  //     await client.query('COMMIT');
-
-  //     const walletResult = await pool.query(
-  //       `SELECT balance FROM votteryy_user_wallets WHERE user_id = $1`,
-  //       [winner.user_id]
-  //     );
-
-  //     res.json({
-  //       success: true,
-  //       message: 'Prize disbursement approved and funds transferred to winner wallet',
-  //       winner_id: winnerId,
-  //       user_id: winner.user_id,
-  //       prize_amount: prizeAmount,
-  //       disbursement_status: 'disbursed',
-  //       approved_by: adminId,
-  //       approved_at: new Date().toISOString(),
-  //       new_balance: parseFloat(walletResult.rows[0]?.balance || 0),
-  //     });
-
-  //   } catch (error) {
-  //     await client.query('ROLLBACK');
-  //     console.error('❌ Approve disbursement error:', error);
-  //     res.status(500).json({ error: 'Failed to approve disbursement' });
-  //   } finally {
-  //     client.release();
-  //   }
-  // }
 
   // ADMIN: REJECT DISBURSEMENT
   async rejectDisbursement(req, res) {
@@ -973,82 +937,7 @@ async getLotteryInfo(req, res) {
     client.release();
   }
 }
-  // async rejectDisbursement(req, res) {
-  //   const client = await pool.connect();
-  //   try {
-  //     await client.query('BEGIN');
 
-  //     const { winnerId } = req.params;
-  //     const adminId = req.user.userId;
-  //     const { reason } = req.body;
-
-  //     if (!reason || !reason.trim()) {
-  //       return res.status(400).json({ error: 'Rejection reason is required' });
-  //     }
-
-  //     const winnerResult = await client.query(
-  //       `SELECT * FROM votteryy_lottery_winners WHERE winner_id = $1`,
-  //       [winnerId]
-  //     );
-
-  //     if (winnerResult.rows.length === 0) {
-  //       await client.query('ROLLBACK');
-  //       return res.status(404).json({ error: 'Winner record not found' });
-  //     }
-
-  //     const winner = winnerResult.rows[0];
-
-  //     if (!['pending_approval', 'pending_senior_approval'].includes(winner.disbursement_status)) {
-  //       await client.query('ROLLBACK');
-  //       return res.status(400).json({ 
-  //         error: `Cannot reject disbursement with status: ${winner.disbursement_status}` 
-  //       });
-  //     }
-
-  //     await client.query(
-  //       `UPDATE votteryy_lottery_winners
-  //        SET disbursement_status = 'rejected', rejection_reason = $2,
-  //            admin_approved_by = $3, admin_approved_at = CURRENT_TIMESTAMP
-  //        WHERE winner_id = $1`,
-  //       [winnerId, reason, adminId]
-  //     );
-
-  //     await client.query(
-  //       `INSERT INTO votteryy_audit_logs 
-  //        (action, entity_type, entity_id, user_id, details)
-  //        VALUES ($1, $2, $3, $4, $5)`,
-  //       [
-  //         'PRIZE_DISBURSEMENT_REJECTED',
-  //         'lottery_winner',
-  //         winnerId,
-  //         adminId,
-  //         JSON.stringify({
-  //           winner_user_id: winner.user_id,
-  //           prize_amount: winner.prize_amount,
-  //           reason
-  //         })
-  //       ]
-  //     );
-
-  //     await client.query('COMMIT');
-
-  //     res.json({
-  //       success: true,
-  //       message: 'Prize disbursement rejected',
-  //       winner_id: winnerId,
-  //       disbursement_status: 'rejected',
-  //       rejection_reason: reason,
-  //       rejected_by: adminId,
-  //     });
-
-  //   } catch (error) {
-  //     await client.query('ROLLBACK');
-  //     console.error('❌ Reject disbursement error:', error);
-  //     res.status(500).json({ error: 'Failed to reject disbursement' });
-  //   } finally {
-  //     client.release();
-  //   }
-  // }
 
   // ADMIN: BULK APPROVE DISBURSEMENTS
   async bulkApproveDisbursements(req, res) {

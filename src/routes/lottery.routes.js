@@ -14,6 +14,8 @@ const router = express.Router();
 // =====================================================
 router.get('/elections/:electionId/info', lotteryController.getLotteryInfo);
 router.get('/elections/:electionId/winners', lotteryController.getWinnersAnnouncement);
+// ✅ NEW: Public endpoint for slot machine - returns only ball numbers (no sensitive data)
+router.get('/elections/:electionId/ball-numbers', lotteryController.getPublicBallNumbers);
 
 // =====================================================
 // USER ROUTES (Voters)
