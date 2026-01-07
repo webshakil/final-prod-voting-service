@@ -159,10 +159,15 @@ const participationCheck = await pool.query(
        WHERE election_id = $1 AND user_id = $2`,
       [electionId, String(userId)]
     );
-
+console.log('🔍 PARTICIPATION CHECK:', {
+  electionId,
+  oddjobUserId: String(userId),
+  rowsFound: participationCheck.rows.length,
+  rows: participationCheck.rows,
+});
     const hasVoted = participationCheck.rows.length > 0 && participationCheck.rows[0].has_voted === true;
 
- 
+ console.log('🗳️ HAS VOTED RESULT:', hasVoted);
 
     // Get vote details if user has voted (for receipt/hash info)
     let voteDetails = null;
