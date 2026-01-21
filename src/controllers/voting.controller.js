@@ -276,11 +276,19 @@ console.log('🔍 PARTICIPATION CHECK:', {
 // ========================================
 // GET LIVE RESULTS - FIXED VERSION (ONLY ONE)
 // ========================================
+// ========================================
+// REPLACE YOUR EXISTING getLiveResults FUNCTION WITH THIS
+// DO NOT add new imports - your file already has them
+// ========================================
+
+// Find your existing getLiveResults function and replace it with this:
+
 export const getLiveResults = async (req, res) => {
   const client = await pool.connect();
   
   try {
     const { electionId } = req.params;
+    const { questionId } = req.query; // Optional: filter by specific question
 
     console.log(`\n========================================`);
     console.log(`📊 LIVE RESULTS - Election ${electionId}`);
@@ -309,12 +317,13 @@ export const getLiveResults = async (req, res) => {
 
     const election = electionResult.rows[0];
     const isAnonymous = election.anonymous_voting_enabled || false;
+    const votingType = election.voting_type || 'plurality';
 
     console.log(`📋 Election: ${election.title}`);
     console.log(`🔐 Anonymous: ${isAnonymous}`);
-    console.log(`📊 Voting Type: ${election.voting_type}`);
+    console.log(`📊 Voting Type: ${votingType}`);
 
-    // Check if live results are enabled
+    // Check if live results are enabled (allow if election is completed)
     if (!election.show_live_results && election.status !== 'completed') {
       return res.status(403).json({
         success: false,
@@ -324,32 +333,37 @@ export const getLiveResults = async (req, res) => {
 
     // 2. Determine which table to query
     const votesTableName = isAnonymous ? 'votteryyy_anonymous_votes' : 'votteryy_votes';
-    const statusFilter = isAnonymous ? '' : "AND status = 'valid'";
+    const statusFilter = isAnonymous ? '' : "AND v.status = 'valid'";
 
     console.log(`🗄️  Querying table: ${votesTableName}`);
 
-    // 3. Get questions and options structure
-    const questionsAndOptionsQuery = `
+    // 3. Get all questions and options for this election
+    const questionsQuery = `
       SELECT 
         q.id,
         q.question_text,
         q.question_type,
         q.question_order,
-        json_agg(
-          json_build_object(
-            'id', o.id,
-            'option_text', o.option_text,
-            'option_order', o.option_order
-          ) ORDER BY o.option_order
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', o.id,
+              'option_text', o.option_text,
+              'option_order', o.option_order
+            ) ORDER BY o.option_order
+          ) FILTER (WHERE o.id IS NOT NULL),
+          '[]'
         ) as options
       FROM votteryy_election_questions q
       LEFT JOIN votteryy_election_options o ON q.id = o.question_id
       WHERE q.election_id = $1
+      ${questionId ? 'AND q.id = $2' : ''}
       GROUP BY q.id, q.question_text, q.question_type, q.question_order
       ORDER BY q.question_order
     `;
 
-    const questionsResult = await client.query(questionsAndOptionsQuery, [electionId]);
+    const questionsParams = questionId ? [electionId, questionId] : [electionId];
+    const questionsResult = await client.query(questionsQuery, questionsParams);
 
     if (questionsResult.rows.length === 0) {
       return res.json({
@@ -357,7 +371,7 @@ export const getLiveResults = async (req, res) => {
         data: {
           electionId: parseInt(electionId),
           electionTitle: election.title,
-          votingType: election.voting_type,
+          votingType: votingType,
           isAnonymous: isAnonymous,
           totalVotes: 0,
           questions: [],
@@ -366,83 +380,109 @@ export const getLiveResults = async (req, res) => {
       });
     }
 
-    console.log(`📝 Found ${questionsResult.rows.length} questions`);
+    console.log(`📝 Found ${questionsResult.rows.length} question(s)`);
 
-    // 4. Count votes for each option
+    // 4. Get ALL votes for this election (count in JavaScript for accuracy)
+    const votesQuery = `
+      SELECT v.id, v.answers
+      FROM ${votesTableName} v
+      WHERE v.election_id = $1
+      ${statusFilter}
+    `;
+
+    const votesResult = await client.query(votesQuery, [electionId]);
+    const allVotes = votesResult.rows;
+
+    console.log(`🗳️  Total votes found: ${allVotes.length}`);
+
+    // 5. Count votes for each question and option
     const questions = [];
     let grandTotalVotes = 0;
 
     for (const question of questionsResult.rows) {
-      console.log(`\n   Question ${question.id}: ${question.question_text}`);
+      console.log(`\n   Question ${question.id}: "${question.question_text}"`);
       
       const optionsWithCounts = [];
+      const questionIdStr = question.id.toString();
 
       for (const option of question.options) {
-        if (!option.id) continue; // Skip null options
+        if (!option.id) continue;
 
-        // ⭐ FIXED: Count votes for this specific option
-        const voteCountQuery = `
-          SELECT COUNT(DISTINCT v.id) as count
-          FROM ${votesTableName} v
-          WHERE v.election_id = $1
-          ${statusFilter}
-          AND (
-            -- Plurality/Single choice: answers->'questionId' = 'optionId'
-            (v.answers->$2::text)::text = $3::text
-            OR
-            -- Approval voting: answers->'questionId' is array containing optionId
-            (
-              jsonb_typeof(v.answers->$2::text) = 'array'
-              AND v.answers->$2::text @> $3::jsonb
-            )
-            OR
-            -- Ranked choice: answers->'questionId' is object with optionId as key
-            (
-              jsonb_typeof(v.answers->$2::text) = 'object'
-              AND v.answers->$2::text ? $3::text
-            )
-          )
-        `;
+        const optionIdStr = option.id.toString();
+        let voteCount = 0;
 
-        try {
-          const voteCountResult = await client.query(voteCountQuery, [
-            electionId,
-            question.id.toString(),
-            option.id.toString()
-          ]);
+        // Count votes for this option based on voting type
+        for (const vote of allVotes) {
+          const answers = vote.answers;
+          if (!answers || !answers[questionIdStr]) continue;
 
-          const voteCount = parseInt(voteCountResult.rows[0].count) || 0;
+          const answer = answers[questionIdStr];
+
+          // ✅ PLURALITY: answer is the optionId directly
+          // { "70": 164 } or { "70": "164" }
+          if (votingType === 'plurality' || votingType === 'single_choice') {
+            if (String(answer) === optionIdStr || answer === option.id) {
+              voteCount++;
+            }
+          }
           
-          console.log(`      ${option.option_text}: ${voteCount} votes`);
-
-          optionsWithCounts.push({
-            id: option.id,
-            option_text: option.option_text,
-            option_order: option.option_order,
-            vote_count: voteCount
-          });
-
-        } catch (optionError) {
-          console.error(`      ❌ Error counting votes for option ${option.id}:`, optionError.message);
-          optionsWithCounts.push({
-            id: option.id,
-            option_text: option.option_text,
-            option_order: option.option_order,
-            vote_count: 0
-          });
+          // ✅ APPROVAL: answer is an array of optionIds
+          // { "70": [164, 165] } or { "70": ["164", "165"] }
+          else if (votingType === 'approval') {
+            if (Array.isArray(answer)) {
+              if (answer.includes(optionIdStr) || answer.includes(option.id) || 
+                  answer.map(String).includes(optionIdStr)) {
+                voteCount++;
+              }
+            }
+          }
+          
+          // ✅ RANKED CHOICE: answer is object { optionId: rank }
+          // { "91": { "229": 2, "230": 1, "231": 3 } }
+          // For live results, count first-choice votes (rank === 1)
+          else if (votingType === 'ranked_choice' || votingType === 'rcv') {
+            if (typeof answer === 'object' && !Array.isArray(answer)) {
+              const rank = answer[optionIdStr] || answer[option.id];
+              if (rank === 1 || rank === '1') {
+                voteCount++;
+              }
+            }
+          }
         }
+
+        console.log(`      ${option.option_text}: ${voteCount} votes`);
+
+        optionsWithCounts.push({
+          id: option.id,
+          option_text: option.option_text,
+          option_order: option.option_order,
+          vote_count: voteCount
+        });
       }
 
       // Calculate question total and percentages
       const questionTotalVotes = optionsWithCounts.reduce((sum, opt) => sum + opt.vote_count, 0);
       
+      // Count unique voters for this question
+      const uniqueVotersForQuestion = allVotes.filter(v => 
+        v.answers && v.answers[questionIdStr]
+      ).length;
+
       optionsWithCounts.forEach(opt => {
-        opt.percentage = questionTotalVotes > 0 
-          ? ((opt.vote_count / questionTotalVotes) * 100).toFixed(2)
-          : '0.00';
+        // For approval voting, show approval rate (% of voters who approved)
+        if (votingType === 'approval') {
+          opt.percentage = uniqueVotersForQuestion > 0 
+            ? ((opt.vote_count / uniqueVotersForQuestion) * 100).toFixed(2)
+            : '0.00';
+        } else {
+          // For plurality/ranked choice, show % of total votes
+          opt.percentage = questionTotalVotes > 0 
+            ? ((opt.vote_count / questionTotalVotes) * 100).toFixed(2)
+            : '0.00';
+        }
       });
 
-      grandTotalVotes += questionTotalVotes;
+      grandTotalVotes += uniqueVotersForQuestion;
 
       questions.push({
         id: question.id,
@@ -450,21 +490,25 @@ export const getLiveResults = async (req, res) => {
         question_type: question.question_type,
         question_order: question.question_order,
         options: optionsWithCounts,
-        total_votes: questionTotalVotes
+        total_votes: votingType === 'approval' ? uniqueVotersForQuestion : questionTotalVotes,
+        unique_voters: uniqueVotersForQuestion
       });
 
-      console.log(`      Question total: ${questionTotalVotes} votes`);
+      console.log(`      Question total: ${questionTotalVotes} votes, ${uniqueVotersForQuestion} unique voters`);
     }
 
-    console.log(`\n✅ GRAND TOTAL VOTES: ${grandTotalVotes}`);
+    // Total unique voters
+    const uniqueTotalVoters = allVotes.length;
+
+    console.log(`\n✅ GRAND TOTAL: ${uniqueTotalVoters} unique voters`);
     console.log(`========================================\n`);
 
     const liveResults = {
       electionId: parseInt(electionId),
       electionTitle: election.title,
-      votingType: election.voting_type,
+      votingType: votingType,
       isAnonymous: isAnonymous,
-      totalVotes: grandTotalVotes,
+      totalVotes: uniqueTotalVoters,
       questions,
       lastUpdated: new Date().toISOString(),
     };
@@ -1144,9 +1188,8 @@ async function getLiveResultsData(electionId) {
   const client = await pool.connect();
   
   try {
-    // Check if election is anonymous
     const electionResult = await client.query(
-      `SELECT anonymous_voting_enabled FROM votteryyy_elections WHERE id = $1`,
+      `SELECT anonymous_voting_enabled, voting_type, title FROM votteryyy_elections WHERE id = $1`,
       [electionId]
     );
 
@@ -1155,9 +1198,11 @@ async function getLiveResultsData(electionId) {
       return null;
     }
 
-    const isAnonymous = electionResult.rows[0].anonymous_voting_enabled || false;
+    const election = electionResult.rows[0];
+    const isAnonymous = election.anonymous_voting_enabled || false;
+    const votingType = election.voting_type || 'plurality';
     const votesTableName = isAnonymous ? 'votteryyy_anonymous_votes' : 'votteryy_votes';
-    const statusFilter = isAnonymous ? '' : "AND status = 'valid'";
+    const statusFilter = isAnonymous ? '' : "AND v.status = 'valid'";
 
     // Get questions and options
     const questionsResult = await client.query(
@@ -1165,12 +1210,15 @@ async function getLiveResultsData(electionId) {
         q.id,
         q.question_text,
         q.question_order,
-        json_agg(
-          json_build_object(
-            'id', o.id,
-            'option_text', o.option_text,
-            'option_order', o.option_order
-          ) ORDER BY o.option_order
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'id', o.id,
+              'option_text', o.option_text,
+              'option_order', o.option_order
+            ) ORDER BY o.option_order
+          ) FILTER (WHERE o.id IS NOT NULL),
+          '[]'
         ) as options
       FROM votteryy_election_questions q
       LEFT JOIN votteryy_election_options o ON q.id = o.question_id
@@ -1180,41 +1228,40 @@ async function getLiveResultsData(electionId) {
       [electionId]
     );
 
+    // Get all votes
+    const votesResult = await client.query(
+      `SELECT v.id, v.answers FROM ${votesTableName} v WHERE v.election_id = $1 ${statusFilter}`,
+      [electionId]
+    );
+    const allVotes = votesResult.rows;
+
     const questions = [];
 
     for (const question of questionsResult.rows) {
       const optionsWithCounts = [];
+      const questionIdStr = question.id.toString();
 
       for (const option of question.options) {
         if (!option.id) continue;
+        const optionIdStr = option.id.toString();
+        let voteCount = 0;
 
-        const voteCountQuery = `
-          SELECT COUNT(DISTINCT v.id) as count
-          FROM ${votesTableName} v
-          WHERE v.election_id = $1
-          ${statusFilter}
-          AND (
-            (v.answers->$2::text)::text = $3::text
-            OR
-            (
-              jsonb_typeof(v.answers->$2::text) = 'array'
-              AND v.answers->$2::text @> $3::jsonb
-            )
-            OR
-            (
-              jsonb_typeof(v.answers->$2::text) = 'object'
-              AND v.answers->$2::text ? $3::text
-            )
-          )
-        `;
+        for (const vote of allVotes) {
+          const answers = vote.answers;
+          if (!answers || !answers[questionIdStr]) continue;
+          const answer = answers[questionIdStr];
 
-        const voteCountResult = await client.query(voteCountQuery, [
-          electionId,
-          question.id.toString(),
-          option.id.toString()
-        ]);
-
-        const voteCount = parseInt(voteCountResult.rows[0].count) || 0;
+          if (votingType === 'plurality' || votingType === 'single_choice') {
+            if (String(answer) === optionIdStr || answer === option.id) voteCount++;
+          } else if (votingType === 'approval') {
+            if (Array.isArray(answer) && (answer.includes(optionIdStr) || answer.includes(option.id) || answer.map(String).includes(optionIdStr))) voteCount++;
+          } else if (votingType === 'ranked_choice' || votingType === 'rcv') {
+            if (typeof answer === 'object' && !Array.isArray(answer)) {
+              const rank = answer[optionIdStr] || answer[option.id];
+              if (rank === 1 || rank === '1') voteCount++;
+            }
+          }
+        }
 
         optionsWithCounts.push({
           id: option.id,
@@ -1225,11 +1272,14 @@ async function getLiveResultsData(electionId) {
       }
 
       const questionTotalVotes = optionsWithCounts.reduce((sum, opt) => sum + opt.vote_count, 0);
-      
+      const uniqueVoters = allVotes.filter(v => v.answers && v.answers[questionIdStr]).length;
+
       optionsWithCounts.forEach(opt => {
-        opt.percentage = questionTotalVotes > 0 
-          ? ((opt.vote_count / questionTotalVotes) * 100).toFixed(2)
-          : '0.00';
+        if (votingType === 'approval') {
+          opt.percentage = uniqueVoters > 0 ? ((opt.vote_count / uniqueVoters) * 100).toFixed(2) : '0.00';
+        } else {
+          opt.percentage = questionTotalVotes > 0 ? ((opt.vote_count / questionTotalVotes) * 100).toFixed(2) : '0.00';
+        }
       });
 
       questions.push({
@@ -1237,15 +1287,15 @@ async function getLiveResultsData(electionId) {
         question_text: question.question_text,
         question_order: question.question_order,
         options: optionsWithCounts,
-        total_votes: questionTotalVotes
+        total_votes: votingType === 'approval' ? uniqueVoters : questionTotalVotes
       });
     }
 
-    const grandTotalVotes = questions.reduce((sum, q) => sum + q.total_votes, 0);
-
     return {
       electionId: parseInt(electionId),
-      totalVotes: grandTotalVotes,
+      electionTitle: election.title,
+      votingType,
+      totalVotes: allVotes.length,
       questions,
       lastUpdated: new Date().toISOString(),
     };
@@ -1901,7 +1951,7 @@ export default {
   getVoteAuditLogs,
   getPublicBulletin
 };
-//last workable code only to check biometirc above code
+//last workable codes from github
 // import pool from '../config/database.js';
 // import crypto from 'crypto';
 // import { 
@@ -2133,6 +2183,11 @@ export default {
 //         endTime: formatTime(election.end_time),
 //         status: election.status,
 //         videoUrl: election.topic_video_url || election.video_url,
+//         // ✅ ADD THIS LINE:
+//     biometric_required: election.biometric_required || false,
+//     // Optional: also add authentication_methods if needed
+//     authentication_methods: election.authentication_methods || ['oauth'],
+
 //       },
 //       votingType: election.voting_type || 'plurality',
 //       questions: questionsResult.rows,
@@ -3800,4 +3855,3 @@ export default {
 //   getVoteAuditLogs,
 //   getPublicBulletin
 // };
-
