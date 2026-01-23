@@ -787,23 +787,42 @@ export const castVote = async (req, res) => {
 
         // Store anonymous vote
         const anonymousVoteResult = await client.query(
-          `INSERT INTO votteryyy_anonymous_votes 
-           (election_id, voting_session_id, answers, encrypted_vote, vote_hash, receipt_id, verification_code, vote_token, ip_address, user_agent)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-           RETURNING id, voting_id`,
-          [
-            electionId,
-            votingSessionId,
-            JSON.stringify(answers),
-            encryptedVote,
-            voteHash,
-            receiptId,
-            verificationCode,
-            voteToken,
-            req.ip || req.connection.remoteAddress,
-            req.headers['user-agent']
-          ]
-        );
+  `INSERT INTO votteryyy_anonymous_votes 
+   (election_id, voting_session_id, user_id, answers, encrypted_vote, vote_hash, receipt_id, verification_code, vote_token, ip_address, user_agent)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+   RETURNING id, voting_id`,
+  [
+    electionId,
+    votingSessionId,
+    String(userId),  // ✅ ADDED user_id
+    JSON.stringify(answers),
+    encryptedVote,
+    voteHash,
+    receiptId,
+    verificationCode,
+    voteToken,
+    req.ip || req.connection.remoteAddress,
+    req.headers['user-agent']
+  ]
+);
+        // const anonymousVoteResult = await client.query(
+        //   `INSERT INTO votteryyy_anonymous_votes 
+        //    (election_id, voting_session_id, answers, encrypted_vote, vote_hash, receipt_id, verification_code, vote_token, ip_address, user_agent)
+        //    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        //    RETURNING id, voting_id`,
+        //   [
+        //     electionId,
+        //     votingSessionId,
+        //     JSON.stringify(answers),
+        //     encryptedVote,
+        //     voteHash,
+        //     receiptId,
+        //     verificationCode,
+        //     voteToken,
+        //     req.ip || req.connection.remoteAddress,
+        //     req.headers['user-agent']
+        //   ]
+        // );
 
         anonymousVoteId = anonymousVoteResult.rows[0].id;
         votingUuid = anonymousVoteResult.rows[0].voting_id;
@@ -1951,6 +1970,27 @@ export default {
   getVoteAuditLogs,
   getPublicBulletin
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 //last workable codes from github
 // import pool from '../config/database.js';
 // import crypto from 'crypto';
