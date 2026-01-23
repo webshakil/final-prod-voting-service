@@ -794,7 +794,7 @@ export const castVote = async (req, res) => {
   [
     electionId,
     votingSessionId,
-    String(userId),  // ✅ ADDED user_id
+    parseInt(userId, 10),
     JSON.stringify(answers),
     encryptedVote,
     voteHash,
